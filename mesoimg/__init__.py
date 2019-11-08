@@ -1,4 +1,2 @@
-"""
-Mesoimg entry point.
-"""
-from .camera import Camera
+
+from .mesocam import MesoCam

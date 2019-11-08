@@ -1,39 +1,82 @@
-#import matplotlib
-#matplotlib.use('pdf')
-#import matplotlib.pyplot as plt
+import io
+import logging
+import time
 import numpy as np
-from mesoimg.camera import *
+import picamera
+from mesoimg import MesoCam
 from mesoimg.common import *
 
-#cam = Camera(resolution=(640, 480), sensor_mode=7, frame_rate=30)
-#path = str(clear_path('/home/pi/im.dat'))
-#im = load_raw(path)
-#fig, ax = plt.subplots()
-#ax.imshow(im[:, :, 0])
-#fig.savefig('/home/pi/fig.png')
 
-from picamera import PiCamera
-#cam = PiCamera(resolution=(640, 480), framerate=30, sensor_mode=7)
+logging.basicConfig(level=logging.INFO)
 
-cam = Camera(resolution=(640, 480), sensor_mode=0, frame_rate=30)
-#duration = None
-#n_frames = 60
-#clear_path('/home/pi/mov.h264')
 
-#frames = []
-#clock = Clock(start=True)
-#for fm in cam.iterframes(duration=duration, n_frames=n_frames):
-   ##print(clock.time())
-   #frames.append(fm)
 
-#t_stop = clock.stop()
-#n_frames = len(frames)
+def record(cam=None, *, max_frames=None, max_secs=None):
 
-#print('frames: {}'.format(n_frames))
-#print('secs: {}'.format(t_stop))
-#print('fps: {}'.format(n_frames / t_stop))
+    # Handle max_frames and max_secs arguments.
+    max_frames = np.inf if max_frames is None else max_frames
+    max_secs = np.inf if max_secs is None else max_secs
+    if max_frames == np.inf and max_secs == np.inf:
+        raise ValueError('max_frames and max_secs cannot both be infinite.')
 
+    # Setup state and record variables.
+    frame_counter = 0
+    frames = []
+    clock = Clock()
+    timestamps = []
+    stream = io.BytesIO()
+
+    if cam is None:
+        cam = MesoCam()
+
+    logging.info('Beginning continuous capture.')
+    try:
+        clock.start()
+        for foo in cam.capture_continuous(stream, 'rgb', use_video_port=True):
+
+            frame_counter += 1
+            ts = clock.time()
+
+            if frame_counter > max_frames or ts > max_secs:
+                break
+
+            # Grab the buffered data, and remove non-green channels.
+            arr = stream.getvalue()
+            stream.seek(0)
+
+            # Keep only green chanel.
+            arr = arr[1::3]
+
+            # Update frames and timestamps.
+            frames.append(arr)
+            timestamps.append(ts)
+
+    except:
+        cam.close()
+        clock.stop()
+        raise
+
+    cam.close()
+    clock.stop()
+
+    MesoCam.print_timing_summary(timestamps)
+
+    timestamps = np.array(timestamps)
+    frames = [np.frombuffer(fm, dtype=uint8) for fm in frames]
+
+    return timestamps, frames
+
+
+#cam = MesoCam()
 #cam.close()
+
+T, frames = record(max_secs=5)
+
+
+
+
+
+
 
 
 
