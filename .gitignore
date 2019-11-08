@@ -1,3 +1,7 @@
+
+# Local files
+local/
+
 # Wing files
 *.wpr
 *.wpu
