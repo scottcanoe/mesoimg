@@ -1,38 +1,152 @@
 import os
 from pathlib import Path
 import time
-from typing import Any, Tuple, Union
+from typing import Any, Callable, Tuple, Union
 import numpy as np
 
 
 __all__ = [
+
+    # Constants
+    'ArrayTransform',
     'PathLike',
     'uint8',
-    'clear_path',
-    'is_rpi',
-    'load_raw',
+    
+    # OS/filesystem.
+    'pi_info',
+    'pathlike',
+    'remove',
+    'read_json',
+    'write_json',
+    'read_text',
+    'write_text',
+
+    # etc.
     'squeeze',
     'Clock',
 ]
 
 
-_IS_RPI = 'arm' in os.uname().machine
+# Define useful constants.
+ArrayTransform = Callable[[np.ndarray], np.ndarray]
 PathLike = Union[str, bytes, Path]
 uint8 = np.dtype('>u1')
 
+# Collect info about raspbian.
+if os.path.exists('/etc/os-release'):
+    with open('/etc/os-release', 'r') as f:
+        lines = f.readlines()
+    _PI_INFO = {}
+    for ln in lines:
+        key, val = ln.split('=')
+        _PI_INFO[key.strip()] = val.strip()
+else:
+    _PI_INFO = None
 
-def clear_path(path: PathLike) -> Path:
-    """Remove a file if it exists, returning a valid writeable path."""
+
+
+"""
+OS/filesystem utilities.
+"""
+
+
+def pi_info():
+    """Infer whether this computer is a raspberry pi."""
+    return _PI_INFO
+
+
+def pathlike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    try:
+        os.fspath(obj)
+        return True
+    except:
+        return False
+        
+
+def remove(path: PathLike) -> Path:
+    """
+    Equivalent to os.remove without raising an error if the file does
+    not exist.
+    """
     path = Path(path)
     if path.exists():
         path.unlink()
     return path
 
 
-def is_rpi():
-    """Infer whether this computer is a raspberry pi."""
-    return _IS_RPI
 
+def read_json(path: PathLike) -> dict:
+    with open(path, 'r') as f:
+        return json.load(f)
+        
+
+def write_json(path: PathLike, data: dict, indent: int=2, **kw) -> None:
+    with open(path, 'w') as f:
+        json.dump(data, f, indent=indent, **kw)
+
+
+def read_text(path: PathLike) -> str:
+    with open(path, 'r') as f:
+        return f.read()
+
+
+def write_text(path: PathLike, text: str) -> None:
+    with open(path, 'w') as f:
+        f.write(text)
+       
+
+
+        
+
+
+# etc.        
+
+def squeeze(arr: np.ndarray) -> np.ndarray:
+    """
+    Call numpy.squeeze on an array only if it can be squeezed (i.e., has singleton
+    dimensions).
+    """
+    return np.squeeze(arr) if 1 in arr.shape else arr
+    
+        
+class Clock:
+    """
+    Class to assist in timing intervals.
+    """
+    
+    def __init__(self,
+                 fn: Callable = time.perf_counter,    
+                 start: bool = False):
+
+        self._fn = fn
+        self.reset(start=start)
+
+                    
+    def start(self) -> None:
+        if self._running:
+            raise RunTimeError("Clock already started.")            
+        self._t_start = self._fn()
+        self._running = True
+    
+    
+    def stop(self) -> None:
+        self._t_stop = self._fn()
+        self._running = False
+
+
+    def reset(self, start: bool = False) -> None:
+        self._t_start = None
+        self._t_stop = None
+        self._running = False
+        if start:
+            self.start()
+
+    def time(self) -> float:
+        return self._fn()
+        
+        
+        
         
 def load_raw(path: PathLike,
              resolution: Tuple[int, int] = (640, 480),
@@ -68,41 +182,21 @@ def load_raw(path: PathLike,
     for i in range(n_frames):
         frame_data = data[i * bytes_per_frame : (i + 1) * bytes_per_frame]
         mov[i] = frame_data.reshape(frame_shape)
-    return mov
-
-        
-def pathlike(obj: Any) -> bool:
-    """Determine whether an object is path-like."""
-    try:
-        os.fsencode(obj)
-        return True
-    except:
-        return False
-
-
-def squeeze(obj):
-    """Squeeze an array only if it has singleton dimensions."""
-    return np.squeeze(obj) if 1 in obj.shape else obj
+    return mov        
     
-        
-class Clock:
     
-    def __init__(self, start: bool = False):
-        self.reset()
-        if start:
-            self.start()
-
-    def reset(self):
-        self._t_start = None
-        self._t_stop = None
-        
-    def start(self) -> float:
-        self._t_start = time.perf_counter()
-        return 0
-
-    def time(self) -> float:
-        return time.perf_counter() - self._t_start
+#from collections import UserDict
+#class DotDict:
     
-    def stop(self) -> float:
-        self._t_stop = time.perf_counter()
-        return self._t_stop - self._t_start    
+    
+#    def __init__(self, **kw):
+#        self.data = kw.copy()
+#        self.x = 0
+
+ #   def __getattr__(self, key):
+  #      print('getattr failed.')
+ 
+
+#d = Dict(a=1,  b='BB')
+
+    

@@ -1,29 +1,35 @@
 from collections import UserDict
 import io
-import json
 import logging
 import os
 from pathlib import Path
 import socket
 import time
-from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple, Union
+from typing import (Any,
+                    Callable,
+                    Iterable,
+                    List,
+                    Mapping,
+                    Optional,
+                    Sequence,
+                    Tuple,
+                    Union)
+import weakref
+import imageio
+import matplotlib.pyplot as plt
 import numpy as np
 import picamera
 from picamera.array import PiRGBArray
-from mesoimg.common import *
+from mesoimg.common import (ArrayTransform,
+                            PathLike,
+                            uint8,
+                            pathlike,
+                            read_json,
+                            write_json,
+                            squeeze,
+                            Clock)
 
-ArrayTransform = Callable[[np.ndarray], np.ndarray]
-PathLike = Union[str, bytes, Path]
-logging.basicConfig(level=logging.INFO)
 
-
-
-def pathlike(obj: Any) -> bool:
-    try:
-        os.fspath(obj)
-        return True
-    except:
-        return False
 
 
 
@@ -102,18 +108,15 @@ class Config(UserDict):
 
         # Update from settings on disk.
         else:
-            path = config
-            with open(path, 'r') as f:
-                aux = json.load(f)
+            aux = read_json(config)
             self.data.update(aux)
         
         # Finally, let any supplied keyword args override other values.
         self.data.update(kw)
 
         
-    def save(self, path: PathLike) -> None:
-        with open(path, 'w') as f:
-            json.dump(self.data, f)
+    def save(self, path: PathLike, **kw) -> None:
+        write_json(path, self.data, **kw)
 
 
 
@@ -168,6 +171,13 @@ for channel in ('r', 'g', 'b'):
 
 
 
+
+
+
+
+
+
+
 class Camera(picamera.PiCamera):
 
     """
@@ -205,8 +215,8 @@ class Camera(picamera.PiCamera):
     
     
     @config.setter
-    def config(self, conf: Union[PathLike, Mapping]) -> None:
-        self._config = Config(conf)
+    def config(self, c: Union[PathLike, Mapping]) -> None:
+        self._config = Config(config)
         
         
     def update_config(self, attrs: Iterable[str]) -> None:
@@ -214,11 +224,9 @@ class Camera(picamera.PiCamera):
             self.config[key] = getattr(self, key)
             
             
-    def start_server(self, port=None):
-        pass
-
     def prepare_to_capture(self):
         self._ready_to_capture = True
+
 
     def prepare_to_record(self):
         self._ready_to_record = True
@@ -238,14 +246,6 @@ class Camera(picamera.PiCamera):
         # Estimate the number of frames that will be captured.
         max_frames = int(np.ceil(tmax * self.framerate))
         
-        # Setup state variables.
-        frame_counter = 0        
-        timestamps = np.zeros(max_frames)
-        clock = Clock()
-
-        # Setup metadata recording.
-        signals = [] if signals is None else signals
-        md = {sig: np.zeros(max_frames) for sig in signals}
         
         # Setup buffer and other configs.
         buf = picamera.PiRGBArray()
@@ -255,7 +255,6 @@ class Camera(picamera.PiCamera):
         if config.raw:
             n_channels = len(config.channels)
             
-
         # Setup output handler.
         
         #- Write to local file. 
@@ -272,6 +271,12 @@ class Camera(picamera.PiCamera):
             
             raise NotImplementedError
         
+        # Setup state variables, and begin.
+        frame_counter = 0
+        timestamps = np.zeros(max_frames)
+        clock = Clock()
+        signals = [] if signals is None else signals
+        df = {sig: np.zeros(max_frames) for sig in signals}
         
         logging.info('Beginning recording.')
         try:
@@ -342,24 +347,57 @@ class Camera(picamera.PiCamera):
         return d        
              
                     
-    #def fix_white_balance
-    def snapshot(self, out=None, preview=False, **kw):
+    def capture(self,
+                out: Union[None, PathLike] = None,
+                show: bool = True,
+                **kw):
 
-        if not self._ready_to_capture:
-            self.prepare_to_capture()
 
+        config = self.config.copy()
+        if kw:
+            config.update(kw)
+        use_video_port = config.use_video_port
+        
+        out_shape = self._get_out_shape(out, config)
+        out_size = np.prod(out_shape)
+
+        # - No output specified, save to buffer (not to disk)
         if out is None:
             out = PiRGBArray(self)
-
-        picamera.PiCamera.capture(self, out, format, **kw)
-        if preview:
-            raise NotImplementedError
+            #out = PiRGBArray(self, size=out_size)
+            format = 'rgb'
             
-        n_xpix, n_ypix = self.resolution
-        im = np.frombuffer(out.getvalue(), dtype=uint8).reshape([n_ypix, n_xpix, 3])
-        return im
+        # - A path was specified, figure out the format.
+        elif pathlike(out):
+            out = Path(out)
+            ext = out.suffix.lower()
+            if ext in ('.h5', '.hdf5'):
+                format = 'rgb'
+                raise NotImplementedError
+            
+            format = None
+            out = str(out)
+            
+        # - Something else (a network socket?) was specified...
+        else:
+            raise NotImplementedError
+
+        picamera.PiCamera.capture(self,
+                                  out,
+                                  format=format,
+                                  use_video_port=config.use_video_port)
+
+        if show:
+            ImageViewer(out)
+
+        return out
         
-    def _get_out_shape(self, config: Config) -> Sequence[int]:
+
+    def _get_format(self, out: Any, config: Config) -> str:
+        pass
+
+        
+    def _get_out_shape(self, out: Any, config: Config) -> Sequence[int]:
 
         n_xpix, n_ypix = self.resolution
         if not config.raw or config.channels == 'rgb':
@@ -367,6 +405,7 @@ class Camera(picamera.PiCamera):
         else:
             return [n_ypix, n_xpix]
 
+    
     
     def _get_channel_extract(self,
                                 config: Config) -> Optional[ArrayTransform]:
@@ -404,24 +443,6 @@ class Camera(picamera.PiCamera):
         print('min IFI: {:.2f} msec.'.format(1000 * np.min(IFIs)))
 
 
-    def _prepare_encoder(self, format=None, channels=None):
-
-        # Handle channels.
-        channels = self.default_channels if channels is None else channels
-        if len(channels) < 1 or not all(c in 'rgb' for c in channels):
-            raise ValueError("Invalid channel argument '{}'.".format(channels))
-        n_channels = len(channels)
-        channel_indices = np.array(['rgb'.find(c) for c in channels])
-
-        # Handle frame shape.
-        n_xpix, n_ypix = self.resolution
-        bytes_per_frame = n_xpix * n_ypix * n_channels
-        if n_channels == 1:
-            frame_shape = (n_ypix, n_xpix)
-        else:
-            frame_shape = (n_ypix, n_xpix, n_channels)
-
-
 
     def __repr__(self):
 
@@ -446,6 +467,58 @@ class Camera(picamera.PiCamera):
         s += 'awb_gains: (red={:.2f}, blue={:.2f})\n'.format(red, blue)
 
         return s
+
+
+
+class ImageViewer:
+
+
+    def __init__(self,
+                 data: Union[PathLike, np.ndarray, PiRGBArray],
+                 figsize: Tuple[float, float] = (8, 8),
+                 cmap: Optional[str] = None):
+
+        if isinstance(data, PiRGBArray):
+            data = data.array
+        elif pathlike(data):
+            data = imageio.imread(data)
+        else:
+            raise NotImplementedError
+
+        # Initialize viewing area.
+        plt.ion()
+        fig = plt.figure(figsize=figsize)
+        ax = fig.add_subplot(1, 1, 1)        
+        im = ax.imshow(data, cmap=cmap)
+        ax.set_aspect('equal')
+        
+        self.data = data
+        self.fig = fig
+        self.ax = ax
+        self.im = im
+        self.cmap = cmap
+        plt.show()
+        
+        
+    def close(self):
+        
+        fig = self.fig
+        self.fig = None
+        self.ax = None
+        self.im = None
+        plt.close(fig)
+        
+                    
+        
+
+        
+    
+        
+    
+        
+
+
+
 
 
 """
@@ -475,68 +548,6 @@ Need input/output adapter.
 - If net streaming, make contiguous, and somehow include metadata.
 
 """
-
-
-#from picamera import PiArrayOutput
-
-
-
-#class Transform:
-
-    #"""
-    #Transform PiRGBArrays  bytes into either .
-    
-
-    #"""
-
-    #_VALID_CHANNELS = ('rgb', 'r', 'g', 'b')
-
-    
-    #def __init__(self, resolution, out, channel):
-        
-        
-        #assert channel in ('rgb', 'r', 'g', 'b')
-        #self._channel = channel
-        #self._channel_index = None if channel == 'rgb' else 'rgb'.find(channel)
-        
-        
-        #n_xpix, n_ypix = resolution
-        
-        
-        #if self._channel == 'rgb':
-            #self._channel_index = None
-            #self._extract_channel = lambda arr : arr
-            #self._out_ndim = 3
-        #else:
-            #self._channel_index = 'rgb'.find(self._channel)
-            #self._extract_channel = lambda arr : arr[:, :, self._channel_index]
-            #self._out_ndim = 2
-
-    #@property
-    #def channel(self):
-        #return self._channel
-
-    #@property
-    #def channel_index(self):
-        #return self._channel_index
-
-    #def __init__(self, arr: 'PiRGBArray'):
-        #mem = arr[self._channel_index::3]
-
-        #return mem
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
