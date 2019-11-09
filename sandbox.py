@@ -64,7 +64,7 @@ def imshow_opencv(im, title='image', **kw):
 
 def reshape(im, resolution=(640, 480)):
 
-    n_xpix, n_ypix = resolutioncam
+    n_xpix, n_ypix = resolution
     
     mono_bytes = n_xpix * n_ypix
     rgb_bytes = mono_bytes * 3
