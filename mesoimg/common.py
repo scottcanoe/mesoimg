@@ -1,7 +1,7 @@
 import os
 from pathlib import Path
 import time
-from typing import Any, Callable, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 import numpy as np
 
 
@@ -24,6 +24,7 @@ __all__ = [
     # etc.
     'squeeze',
     'Clock',
+    'Timer',
 ]
 
 
@@ -111,6 +112,7 @@ def squeeze(arr: np.ndarray) -> np.ndarray:
     
         
 class Clock:
+
     """
     Class to assist in timing intervals.
     """
@@ -120,31 +122,102 @@ class Clock:
                  start: bool = False):
 
         self._fn = fn
-        self.reset(start=start)
+        self.reset()
+        if start:
+            self.start()
 
                     
-    def start(self) -> None:
+    def start(self) -> float:
         if self._running:
             raise RunTimeError("Clock already started.")            
         self._t_start = self._fn()
         self._running = True
-    
-    
-    def stop(self) -> None:
-        self._t_stop = self._fn()
+        return 0
+        
+    def time(self) -> float:
+        if not self._running:
+            raise RunTimeError('Clock is stopped.')
+        return self._fn() - self._t_start
+
+    def stop(self) -> float:
+        self._t_stop = self.time()
         self._running = False
+        return self._t_stop
 
-
-    def reset(self, start: bool = False) -> None:
+    def reset(self) -> None:
         self._t_start = None
         self._t_stop = None
         self._running = False
+        
+    
+class Timer:
+
+    """
+    Class to assist in timing intervals.
+    """
+    
+    def __init__(self,
+                 fn: Callable = time.perf_counter,
+                 start: bool = False,
+                 ID: Any = None,
+                 verbose: bool = False):
+
+        self._fn = fn
+        self._ID = ID
+        self._verbose = verbose
+        self.reset()
         if start:
             self.start()
 
-    def time(self) -> float:
-        return self._fn()
+    @property
+    def ID(self) -> Any:
+        return self._ID
         
+    @property
+    def timestamps(self):
+        return self._timestamps
+        
+    def reset(self, start: bool = False) -> Optional[float]:
+        self._t_start = None
+        self._t_stop = None
+        self._running = False
+        self._timestamps = []
+        if start:
+            self.start()  
+                    
+                    
+    def start(self) -> float:
+        if self._running:
+            raise RunTimeError("Clock already started.")      
+        self._t_start = self._fn()
+        self._timestamps = [0]
+        self._running = True
+        return 0
+        
+        
+    def tic(self) -> float:
+        if not self._running:
+            raise RunTimeError('Clock is stopped.')
+        t = self._fn() - self._t_start
+        self._timestamps.append(t)
+        return t
+
+
+    def stop(self, verbose: Optional[bool] = None) -> float:
+        self._t_stop = self.tic()
+        self._running = False
+
+        verbose = self._verbose if verbose is None else verbose
+        if verbose:
+            self.print_summary()
+        
+        return self._t_stop
+
+
+    def print_summary(self) -> None:
+        s  = f'<Timer (ID={self.ID}): '
+        s += f'elapsed={self._t_stop}>'
+        print(s, flush=True)
         
         
         
