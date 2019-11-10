@@ -1,36 +1,45 @@
 import os
 from pathlib import Path
 import time
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, NamedTuple, Optional, Tuple, Union
+import urllib
+from urllib.parse import urlparse, ParseResult
 import numpy as np
 
 
 __all__ = [
 
-    # Constants
+    # Constants/type hints.
     'ArrayTransform',
     'PathLike',
+    'URLLike',
     'uint8',
     
     # OS/filesystem.
     'pi_info',
-    'pathlike',
     'remove',
     'read_json',
     'write_json',
     'read_text',
     'write_text',
+    
+    # URL/path handling.
+    'pathlike',
+    'urllike',
+    'parse_url',
 
     # etc.
     'squeeze',
     'Clock',
     'Timer',
+        
 ]
 
 
 # Define useful constants.
 ArrayTransform = Callable[[np.ndarray], np.ndarray]
 PathLike = Union[str, bytes, Path]
+URL = Union[str, bytes, Path, urllib.parse.ParseResult]
 uint8 = np.dtype('>u1')
 
 # Collect info about raspbian.
@@ -56,14 +65,7 @@ def pi_info():
     return _PI_INFO
 
 
-def pathlike(obj: Any) -> bool:
-    """Determine whether an object is interpretable as a filesystem path."""
-    try:
-        os.fspath(obj)
-        return True
-    except:
-        return False
-        
+
 
 def remove(path: PathLike) -> Path:
     """
@@ -99,6 +101,159 @@ def write_text(path: PathLike, text: str) -> None:
 
 
         
+# URL and path handling.
+
+def pathlike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    try:
+        os.fspath(obj)
+        return True
+    except:
+        return False
+        
+
+def urllike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    if pathlike(obj) or isinstance(obj, (ParseResult, URL)):
+        return True
+    return False        
+
+
+
+class DictView:
+
+    def __init__(self, data: Mapping):
+        self._data = data
+
+    def keys(self):
+        return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def items(self):
+        return self._data.items()
+
+    def pop(self, key):
+        raise TypeError('Cannot modify DictView')
+                
+    def update(self, other: Mapping):
+        raise TypeError('Cannot modify DictView')
+
+    def __getitem__(self, key):
+        return self._data[key]
+    
+    def __setitem__(self, key, val):
+        raise TypeError('Cannot modify DictView')
+        
+    def __delitem__(self, key):
+        raise TypeError('Cannot modify DictView')
+    
+    def __contains__(self, key):
+        return key in self.keys()
+        
+    def __len__(self):
+        return len(self._data)
+
+
+import re
+
+
+from collections import namedtuple
+
+
+    
+
+    
+class URL:
+        
+    
+    _fields = ('scheme',
+               'netloc',
+               'path',
+               'params',
+               'query',
+               'fragment')
+
+    _attrs = ('hostname',
+              'password',
+              'port')
+              
+    
+    
+    def __new__(cls,
+                url: URLLike,
+                *,
+                copy: bool = False,
+                **kw):
+
+        scheme = kw.pop('scheme', None)
+        flags = kw
+
+        # Parse path-like input.
+        if isinstance(url, (bytes, str, Path)):
+            res = urlparse(url)
+
+        # Store parse results.
+        elif isinstance(url, ParseResult):
+            res = url
+
+        # Return a copy of the template URL.
+        elif isinstance(url, URL):
+            if copy:
+            
+                # Copy over field and attribute values to a new instance.
+                instance = object.__new__(cls)
+                for group in (cls._fields, cls._attrs):
+                    for name in group:
+                        setattr(instance, '_' + name, getattr(url, name))                      
+                
+                return instance
+
+            return url
+
+        else:
+            raise ValueError("{} is not a valid URL.".format(url))
+        
+        
+        # Finish parsing the parse result.
+        # If a scheme was supplied, override what was found by urlparse.
+            
+            
+        if scheme is not None:
+            res = res._replace(scheme=scheme)
+        
+        if 'scheme' in kw:
+            scheme = kw.pop('scheme')
+            
+            
+             
+    
+    
+            
+def parse_url(url: URLLike,
+              copy: bool = True,
+              READONLY: bool = False) -> ParseResult:
+    
+    if 'scheme' in kw:
+        scheme = kw['scheme']
+        force_scheme = True
+    if isinstance(url, URL):
+        return url
+    
+    if isinstance(url, (bytes, str, Path)):
+        res = urlparse(os.fsdecode(url))
+    elif isinstance(url, ParseResult):
+        res = url
+    elif isinstance(url, URL):
+        if copy:
+            return url.copy()
+        return url
+
+    res = url if isinstance(url, ParseResult) else urlparse(os.fsdecode(url))
+    return res
+                
+
 
 
 # etc.        
@@ -257,19 +412,11 @@ def load_raw(path: PathLike,
         mov[i] = frame_data.reshape(frame_shape)
     return mov        
     
-    
-#from collections import UserDict
-#class DotDict:
-    
-    
-#    def __init__(self, **kw):
-#        self.data = kw.copy()
-#        self.x = 0
 
- #   def __getattr__(self, key):
-  #      print('getattr failed.')
- 
 
-#d = Dict(a=1,  b='BB')
 
-    
+
+
+
+
+

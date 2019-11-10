@@ -14,9 +14,8 @@ from typing import (Any,
                     Sequence,
                     Tuple,
                     Union)
-import weakref
+
 import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import picamera
 from picamera.array import PiRGBArray
@@ -28,7 +27,7 @@ from mesoimg.common import (ArrayTransform,
                             write_json,
                             squeeze,
                             Clock)
-
+from mesoimg.display import ImageViewer
 
 
 
@@ -51,7 +50,7 @@ class Property:
 
 
 
-class Config(UserDict):
+class CameraConfig(UserDict):
     
         
     #: Width and height of imagery in pixels.
@@ -81,14 +80,29 @@ class Config(UserDict):
     #: Two-tuple of white-balance gains (red, blue).
     awb_gains = Property('awb_gains')
     
+    #: Whether to use the video port (faster).
+    use_video_port = Property('use_video_port')
+
     #: Whether to horizontally flip image (in GPU).
     hflip = Property('hflip')
     
     #: Whether to vertically flip image (in GPU).
     vflip = Property('vflip')
-               
-    #: Whether to use the video port (faster).
-    use_video_port = Property('use_video_port')
+                   
+    
+    _KEYS = [
+      'resolution',
+      'framerate',
+      'raw',
+      'channels',
+      'exposure_mode',
+      'shutter_speed',
+      'awb_mode',
+      'awb_gains',
+      'use_video_port',
+      'hflip',
+      'vflip',
+    ]
     
            
     def __init__(self,
@@ -99,7 +113,7 @@ class Config(UserDict):
         self.data = CAM_CONFIGS['default'].copy()
                 
         # Update from a supplied dict/Config object.
-        if isinstance(config, (dict, Config)):
+        if isinstance(config, (dict, CamConfig)):
             self.data.update(config)
                 
         # Update from a hard-coded setting.
@@ -118,6 +132,13 @@ class Config(UserDict):
     def save(self, path: PathLike, **kw) -> None:
         write_json(path, self.data, **kw)
 
+
+    def __repr__(self):
+        s  = '  Config  \n'
+        s += '----------\n'
+        for key in self._KEYS:
+            s += '{}: {}\n'.format(key, self.data[key])
+        return s
 
 
 
@@ -203,7 +224,7 @@ class Camera(picamera.PiCamera):
                  **kw):
         
         logging.info('Initializing MesoCam.')
-        self._config = Config(config, **kw)
+        self._config = CamConfig(config, **kw)
         super().__init__(resolution=self.config.resolution,
                          framerate=self.config.framerate,
                          sensor_mode=self.config.sensor_mode)
@@ -224,14 +245,51 @@ class Camera(picamera.PiCamera):
             self.config[key] = getattr(self, key)
             
             
-    def prepare_to_capture(self):
-        self._ready_to_capture = True
+    def capture(self,
+                out: Union[None, PathLike] = None,
+                show: bool = True,
+                **kw):
 
 
-    def prepare_to_record(self):
-        self._ready_to_record = True
+        config = self.config.copy()
+        if kw:
+            config.update(kw)
+        
+        out_shape = self._get_out_shape(out, config)
+        out_size = np.prod(out_shape)
 
+        # - No output specified, save to buffer (not to disk)
+        if out is None:
+            out = PiRGBArray(self)
+            #out = PiRGBArray(self, size=out_size)
+            format = 'rgb'
+            
+        # - A path was specified, figure out the format.
+        elif pathlike(out):
+            out = Path(out)
+            ext = out.suffix.lower()
+            if ext in ('.h5', '.hdf5'):
+                format = 'rgb'
+                raise NotImplementedError
+            
+            format = None
+            out = str(out)
+            
+        # - Something else (a network socket?) was specified...
+        else:
+            raise NotImplementedError
 
+        picamera.PiCamera.capture(self,
+                                  out,
+                                  format=format,
+                                  use_video_port=config.use_video_port)
+
+        if show:
+            ImageViewer(out)
+
+        return out
+        
+        
     def record(self,
                out: Union[PathLike, socket.socket],     # Filename or socket.
                tmax: float,
@@ -347,50 +405,7 @@ class Camera(picamera.PiCamera):
         return d        
              
                     
-    def capture(self,
-                out: Union[None, PathLike] = None,
-                show: bool = True,
-                **kw):
 
-
-        config = self.config.copy()
-        if kw:
-            config.update(kw)
-        use_video_port = config.use_video_port
-        
-        out_shape = self._get_out_shape(out, config)
-        out_size = np.prod(out_shape)
-
-        # - No output specified, save to buffer (not to disk)
-        if out is None:
-            out = PiRGBArray(self)
-            #out = PiRGBArray(self, size=out_size)
-            format = 'rgb'
-            
-        # - A path was specified, figure out the format.
-        elif pathlike(out):
-            out = Path(out)
-            ext = out.suffix.lower()
-            if ext in ('.h5', '.hdf5'):
-                format = 'rgb'
-                raise NotImplementedError
-            
-            format = None
-            out = str(out)
-            
-        # - Something else (a network socket?) was specified...
-        else:
-            raise NotImplementedError
-
-        picamera.PiCamera.capture(self,
-                                  out,
-                                  format=format,
-                                  use_video_port=config.use_video_port)
-
-        if show:
-            ImageViewer(out)
-
-        return out
         
 
     def _get_format(self, out: Any, config: Config) -> str:
@@ -447,10 +462,10 @@ class Camera(picamera.PiCamera):
     def __repr__(self):
 
         if self._camera is None:
-            return 'MesoCam (closed)'            
+            return 'Camera (closed)'      
 
-        s  = '       MesoCam      \n'
-        s += '--------------------\n'
+        s  = '       Camera      \n'
+        s += '-------------------\n'
         
         attrs = ['resolution',
                  'sensor_mode',
@@ -470,46 +485,7 @@ class Camera(picamera.PiCamera):
 
 
 
-class ImageViewer:
 
-
-    def __init__(self,
-                 data: Union[PathLike, np.ndarray, PiRGBArray],
-                 figsize: Tuple[float, float] = (8, 8),
-                 cmap: Optional[str] = None):
-
-        if isinstance(data, PiRGBArray):
-            data = data.array
-        elif pathlike(data):
-            data = imageio.imread(data)
-        else:
-            raise NotImplementedError
-
-        # Initialize viewing area.
-        plt.ion()
-        fig = plt.figure(figsize=figsize)
-        ax = fig.add_subplot(1, 1, 1)        
-        im = ax.imshow(data, cmap=cmap)
-        ax.set_aspect('equal')
-        
-        self.data = data
-        self.fig = fig
-        self.ax = ax
-        self.im = im
-        self.cmap = cmap
-        plt.show()
-        
-        
-    def close(self):
-        
-        fig = self.fig
-        self.fig = None
-        self.ax = None
-        self.im = None
-        plt.close(fig)
-        
-                    
-        
 
         
     

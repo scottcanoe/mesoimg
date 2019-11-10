@@ -12,22 +12,27 @@ from typing import (Any,
                     Sequence,
                     Tuple,
                     Union)
+from urllib.parse import urlparse, ParseResult
+import h5py
 import numpy as np
 import picamera
 from picamera import PiCamera
 from picamera.array import PiRGBArray
-#from mesoimg.camera import Camera
-
-#path = remove('/home/pi/foo.jpeg')
+from mesoimg.common import *
 
 
-#cam = Camera()
-#cam.capture(path, show=True)
-#cam.close()                              
-from typing import NamedTuple
 
-class A(NamedTuple):
-    x: int = 0
-    y: int = 1
-    
-a = A()    
+
+
+
+class H5Interface:
+
+
+    def __init__(self, parent: 'Camera', url: URLLike):
+        self.parent = parent
+        self.url = parse_url(url)
+        self.file = None
+        
+        
+    def open(self):
+        self.file = h5py.File(
