@@ -238,6 +238,9 @@ def parse_url(url: URLLike,
     if 'scheme' in kw:
         scheme = kw['scheme']
         force_scheme = True
+    else:
+        force_scheme = False
+        
     if isinstance(url, URL):
         return url
     
