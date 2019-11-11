@@ -12,7 +12,3 @@
     #data = s.recv(1024)
     #print('Received: {}'.format(data))
 
-from urllib.parse import *
-import psutil
-procs = [p for p in psutil.process_iter()]
-#procs = [p for p in psutil.process_iter() if p.pid == 818]

@@ -11,12 +11,22 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     conn, addr = s.accept() # Blocking?
     with conn:
         print('Connected by: {}'.format(addr))
+        cmd = ''
+        running = True
+        data = {}
         while True:
-            data = conn.recv(1024)
-            if not data:
+            cmd = input('>> ')
+            if cmd == 'q':
                 break
-            print('Received: {}'.format(data))
-            conn.sendall(b'Message received.')
+            socket.sendall(cmd.encode())
+                    
+
+        #while True:
+         #   data = conn.recv(1024)
+          #  if not data:
+           #     break
+           # print('Received: {}'.format(data))
+           # conn.sendall(b'Message received.')
             
                
     
