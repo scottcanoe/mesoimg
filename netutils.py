@@ -2,8 +2,15 @@
 Various networking utilities.
 """
 import fnmatch
-from typing import List, Union, Optional
+from typing import Callable, List, Union, Optional
 import psutil
+
+
+__all__ = [
+    'kill',
+    'net_connections',
+    'net_processes',
+]
 
 
 def kill(p: Union[int, psutil.Process]) -> None:
@@ -15,60 +22,78 @@ def kill(p: Union[int, psutil.Process]) -> None:
     p.kill()
 
 
+
 def net_connections(kind: str = 'inet',
-                    *,
                     ip: Optional[str] = None,
-                    port: Optional[int] = None,                    
-                    ) -> List[psutil._common.sconn]:
+                    port: Optional[int] = None,
+                    status: Optional[str] = None) \
+                    -> List[psutil._common.sconn]:
 
     """
     Like psutil.net_connections but with built-in filtering capabilities.
-    If `ip` and/or `port` are supplied, only connections with a
-    matching endpoint will be returned. Wildcards `ip` addresses
-    are supported.
+    Optionally filter by `kind` (e.g., 'tcp'), `ip`, `port`, or `status`.
+    `ip` may contain wildcards.
     
+    See https://psutil.readthedocs.io/en/latest/#connections-constants for
+    status values. Not case-sensitive.
+
     """
-
-    def ip_match(addr):
-        return addr and fnmatch.fnmatch(addr.ip, ip)
-
-    def port_match(addr):
-        return addr and addrport == port
-
 
     # Get all network connections.
     conns = psutil.net_connections(kind)
         
     # Apply ip filter.
     if ip:
-        conns = [c for c in conns if ip_match(c.laddr) or \
-                                     ip_match(c.raddr)]
-            
+        
+        if '*' in ip:
+            fn = lambda addr : fnmatch.fnmatch(addr, ip) if addr else False
+        else:
+            fn = lambda addr : addr == ip if addr else False        
+
+        conns = [c for c in conns if fn(c.laddr) or fn(c.raddr)]
+                                 
     # Apply port filter.
     if port:
-        conns = [c for c in conns if port_match(c.laddr) or \
-                                     port_match(c.raddr)]
-
+        fn = lambda addr : addr.port == port if addr else False 
+        conns = [c for c in conns if fn(c.laddr) or fn(c.raddr)]
+ 
+    # Apply status filter.
+    if status:
+        status = status.upper()
+        conns = [c for c in conns if c.status == status]
+    
     return conns
 
 
-def net_pids(*args, **kw) -> List[int]:
-
-    """
-    Return pids that are associated with network connections.    
-    See `net_connections` for meaning of ``*args`` and ``**kw``.    
-    """
-    
-    conns = net_connections(*args, **kw)
-    return list(set([c.pid for c in conns if c.pid is not None]))
 
 
-
-def net_processes(*args, **kw) -> List[psutil.Process]:
+def net_processes(name: Optional[str] = None,
+                  kind: str = 'inet',
+                  **kw) \
+                  -> List[psutil.Process]:
     """
     Return processes objects associated with network connections.
-    See `net_connections` for meaning of ``*args`` and ``**kw``.
+    Optionally filter by process name (wildcards supported) and/or
+    connection specs. See ``net_connections`` for those parameters.
     
     """
-    return [psutil.Process(pid) for pid in net_pids(*args, **kw)]
+
+    # Handle filtering by connection specs if requested.
+    if kw:
+        conns = net_connections(kind=kind, **kw)
+        pids = set([c.pid for c in conns if c is not None])
+        procs = [psutil.Process(val) for val in pids]
+    else:
+        procs = [p for p in psutil.process_iter() if p.connections(kind=kind)]
+
+    # Optionally filter by name.
+    if name:
+        if '*' in name:
+            fn = lambda s : fnmatch.fnmatch(s, name)
+        else:
+            fn = lambda s : s == name
+        procs = [p for p in procs if fn(p.name())]
+        
+    return procs
+    
 
