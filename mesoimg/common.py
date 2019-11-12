@@ -2,8 +2,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping, NamedTuple, Optional, Tuple, Union
-import urllib
-from urllib.parse import urlparse, ParseResult
+import urllib.parse
 import numpy as np
 
 
@@ -30,15 +29,12 @@ __all__ = [
 
     # etc.
     'squeeze',
-    'Clock',
-    'Timer',
-        
 ]
 
 
 # Define useful constants.
 ArrayTransform = Callable[[np.ndarray], np.ndarray]
-PathLike = Union[str, bytes, Path]
+PathLike = Union[str, Path]
 URL = Union[str, bytes, Path, urllib.parse.ParseResult]
 uint8 = np.dtype('>u1')
 
@@ -106,8 +102,7 @@ def write_text(path: PathLike, text: str) -> None:
 def pathlike(obj: Any) -> bool:
     """Determine whether an object is interpretable as a filesystem path."""
     try:
-        os.fspath(obj)
-        return True
+        return isinstance(obj, (str, Path))
     except:
         return False
         
@@ -156,108 +151,27 @@ class DictView:
         return len(self._data)
 
 
-import re
-
-
-from collections import namedtuple
-
-
-    
-
-    
-class URL:
-        
-    
-    _fields = ('scheme',
-               'netloc',
-               'path',
-               'params',
-               'query',
-               'fragment')
-
-    _attrs = ('hostname',
-              'password',
-              'port')
-              
-    
-    
-    def __new__(cls,
-                url: URLLike,
-                *,
-                copy: bool = False,
-                **kw):
-
-        scheme = kw.pop('scheme', None)
-        flags = kw
-
-        # Parse path-like input.
-        if isinstance(url, (bytes, str, Path)):
-            res = urlparse(url)
-
-        # Store parse results.
-        elif isinstance(url, ParseResult):
-            res = url
-
-        # Return a copy of the template URL.
-        elif isinstance(url, URL):
-            if copy:
-            
-                # Copy over field and attribute values to a new instance.
-                instance = object.__new__(cls)
-                for group in (cls._fields, cls._attrs):
-                    for name in group:
-                        setattr(instance, '_' + name, getattr(url, name))                      
-                
-                return instance
-
-            return url
-
-        else:
-            raise ValueError("{} is not a valid URL.".format(url))
-        
-        
-        # Finish parsing the parse result.
-        # If a scheme was supplied, override what was found by urlparse.
-            
-            
-        if scheme is not None:
-            res = res._replace(scheme=scheme)
-        
-        if 'scheme' in kw:
-            scheme = kw.pop('scheme')
-            
-            
-             
     
     
             
-def parse_url(url: URLLike,
-              copy: bool = True,
-              READONLY: bool = False) -> ParseResult:
-    
-    if 'scheme' in kw:
-        scheme = kw['scheme']
-        force_scheme = True
-    else:
-        force_scheme = False
-        
-    if isinstance(url, URL):
+def urlparse(url: PathLike,
+             scheme: str = '',
+             ) -> urllib.parse.ParseResult:
+    """
+    Like urllib.parse.urlparse but capable of handling pathlib paths and 
+    parse results.
+    """
+    if isinstance(url, urllib.parse.ParseResult):
+        url = url._replace(scheme=scheme) if scheme else url
         return url
     
-    if isinstance(url, (bytes, str, Path)):
-        res = urlparse(os.fsdecode(url))
-    elif isinstance(url, ParseResult):
-        res = url
-    elif isinstance(url, URL):
-        if copy:
-            return url.copy()
-        return url
-
-    res = url if isinstance(url, ParseResult) else urlparse(os.fsdecode(url))
+    url = str(url) if isinstance(url, (bytes, Path)) else url
+    if not isinstance(url, str):
+        raise ValueError(f"invalid argument '{url}' for urlparse.")
+    
+    res = urllib.parse.urlparse(url)
     return res
                 
-
-
 
 # etc.        
 

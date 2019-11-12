@@ -1,15 +1,26 @@
+import logging
 from typing import Any, Callable, Optional
 import time as _time
 import numpy as np
 
 
+__all__ = [
+    'time',
+    'today',
+    'Clock',
+    'Timer',
+]
+
 
 def time() -> float:
     """
-    Wrapper for built-in ``time.time`` to keep all time
+    Get current UNIX time. Wraps built-in ``time.time`` to keep all time
     related functions in the same place to simplify imports.
     """
     return _time.time()
+
+
+sleep = _time.sleep
 
 
 def today() -> str:
@@ -104,53 +115,58 @@ class Timer:
     
     def __init__(self,
                  name: str = '',
-                 *,
-                 start: bool = True,
-                 time_fn: Callable[[], float] = _time.perf_counter,
                  verbose: bool = False,
+                 time_fn: Callable[[], float] = _time.perf_counter,
                  logger: Optional[logging.Logger] = None):
 
         self._name = name
-        self._time_fn = time_fn
         self._verbose = verbose
+        self._time_fn = time_fn
         self._logger = logger
         self.reset()
-        if start:
-            self.start()
 
     @property
     def name(self) -> str:
-        return self._ID
+        return self._name
         
     @property
     def running(self) -> bool:
         return self._running
 
     @property
-    def timestamps(self) -> np.ndarray:        
-        return np.array(self._timestamps)
+    def timestamps(self) -> np.ndarray:
+        if isinstance(self._timestamps, list):
+            return np.array(self._timestamps)
+        return self._timestamps
+
         
-        
-    def reset(self):
+    def reset(self) -> 'Timer':
         self._t_start = None
         self._t_stop = None
         self._running = False
         self._timestamps = []
                         
                     
-    def start(self) -> float:
+    def start(self) -> 'Timer':
         self.check_not_running()
         self._t_start = self._time_fn()
         self._timestamps = [0]
         self._running = True
-        return 0
-        
-        
-    def tic(self) -> float:
+        return self
+            
+    def tic(self) -> 'Timer':
         self.check_running()
         t = self._time_fn() - self._t_start
         self._timestamps.append(t)
-        return t
+        return self
+
+    def stop(self) -> 'Timer':
+        self.check_running()
+        self._t_stop = self._time_fn()
+        self._running = False
+        self._timestamps = np.array(self._timestamps)
+        if self._verbose:
+            self.print_summary()
 
 
     def check_running(self) -> None:
@@ -164,9 +180,11 @@ class Timer:
 
 
     def print_summary(self) -> None:
-        s = '<Timer ('
-        if self._name:
-            s += f'name={self._name}, '
-        s += f'elapsed={self._t_stop}>'
+        s = "<Timer "
+        if self.name:
+            s = f"Timer('{self.name}') finished: "
+        else:            
+            s = "<Timer finished: "        
+        s += f'time={self._t_stop} sec.>'
         print(s, flush=True)
         
