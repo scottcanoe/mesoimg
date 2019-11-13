@@ -3,11 +3,12 @@ import logging
 from typing import Any, Callable, Optional
 import time
 import numpy as np
+from .common import repr_secs
 
 
 __all__ = [
     'Clock',
-    'Timer',
+    'IntervalTimer',
 ]
 
 
@@ -88,7 +89,7 @@ class Clock:
         
     
 
-class Timer:
+class IntervalTimer:
 
     """
     Class for ticking off intervals.
@@ -96,6 +97,7 @@ class Timer:
     
     def __init__(self,
                  name: str = '',
+                 start: bool = True,
                  verbose: bool = False,
                  time_fn: Callable[[], float] = time.perf_counter,
                  logger: Optional[logging.Logger] = None):
@@ -105,6 +107,8 @@ class Timer:
         self._time_fn = time_fn
         self._logger = logger
         self.reset()
+        if start:
+            self.start()
 
     @property
     def name(self) -> str:
@@ -120,73 +124,70 @@ class Timer:
             return np.array(self._timestamps)
         return self._timestamps
 
+    @property
+    def count(self) -> int:
+        return len(self._timestamps)
+
         
     def reset(self) -> None:
         """
         Reset all attributes regardless of whether timer is running.
         """
         self._t_start = None
-        self._start_included = None
         self._t_stop = None
-        self._stop_included = None
         self._running = False
         self._timestamps = []
-        self._stats = None
                         
                     
-    def start(self, include: bool = False) -> float:
+    def start(self) -> float:
         """
-        Start the timer. Set ``tic=True`` to include to start
-        the timestamp array with a zero.
-        
-        Returns 0.
-        
+        Start the timer. Does not add a timestamp.        
         """
-        self.check_not_running()
+        t = self._time_fn()
+        self._check_not_running()
         self._running = True
-        self._t_start = self._time_fn()
-        if include:
-            self._start_included = True
-            self._timestamps = [0]
-        else:
-            self._start_included = False
+        self._t_start = t
         return 0
             
             
     def tic(self) -> float:
-        self.check_running()
+        """
+        Add a timestamp.
+        """
         t = self._time_fn() - self._t_start
+        self._check_running()
         self._timestamps.append(t)
         return self
 
 
-    def stop(self, include: bool = False) -> float:
+    def stop(self) -> float:
         """
         Stop the timer. Set ``tic=True`` to append timestamps
         with stop time. Prints a summary if verbose.
         """
-        self.check_running()
+        t = self._time_fn() - self._t_start
+        self._check_running()
         self._running = False
-        self._t_stop = self._time_fn() - self._t_start
-        if include:
-            self._stop_included = True
-            self._timestamps.append(self._t_stop)
-        else:
-            self._stop_included = False
-            
+        self._t_stop = t
         self._timestamps = np.array(self._timestamps)
-        
         if self._verbose:
             self.print_summary()
 
 
-    def check_running(self) -> None:
+    def tell(self) -> float:
+        """
+        Get the time without adding a timestamp.
+        """
+        return self._time_fn() - self._t_start
+        
+        
+    def _check_running(self) -> None:
         """Raise ``RuntimeError`` if not running."""
         if not self._running:
             raise RuntimeError('Timer is not running.')
 
 
-    def check_not_running(self) -> None:
+    def _check_not_running(self) -> None:
         """Raise ``RuntimeError`` if running."""
         if self._running:
             raise RuntimeError('Timer is running.')
@@ -195,6 +196,12 @@ class Timer:
     def print_summary(self) -> None:
         """Print some timestamps info."""
 
+        
+        ts = self.timestamps
+        n_tics = len(ts)
+        n_secs = self._t_stop
+        tics_per_sec = n_tics / n_secs
+        periods = np.ediff1d(ts)
 
         if self.name:
             s = f"Timer('{self.name}')\n"
@@ -202,20 +209,14 @@ class Timer:
             s = "     Timer     \n"
         s += '-' * (len(s) - 1) + '\n'
 
-        ts = self.timestamps        
-        n_tics = len(ts)
-        t_stop = self._t_stop
-        tics_per_sec = n_tics / t_stop
-        periods = np.ediff1d(ts)
         
-        s += f'time: {t_stop}\n'      
+        s += 'time: {:.2f} {}\n'.format(*repr_secs(n_secs))
         s += f'tics: {n_tics}\n'
-        s += f'tics/sec: {tics_per_sec}\n'
+        s += 'tics/sec: {:.2f}\n'.format(repr_secs(tics_per_sec)[0])
         for stat_name in ('mean', 'median', 'min', 'max'):
-            fn = getattr(np, stat_name)
-            stat = fn(periods)
-            s += f'{stat_name}: {stat}\n'
-                        
+            stat = getattr(np, stat_name)(periods)
+            s += '{} ITI: {:.2f} {}\n'.format(stat_name, *repr_secs(stat))
+                    
         print(s, flush=True)
         
         

@@ -32,7 +32,9 @@ __all__ = [
     'write_json',
     'read_text',
     'write_text',
-    
+    'read_raw',
+    'read_h264',
+        
     # URL/path handling.
     'fspath',
     'pathlike',
@@ -46,6 +48,7 @@ __all__ = [
     'squeeze',
     'today',
     'DictProxy',
+    'repr_secs',
 ]
 
 
@@ -110,18 +113,75 @@ def write_text(path: PathLike, text: str) -> None:
         f.write(text)
        
 
+def read_raw(path: PathLike,
+             resolution: Tuple[int, int] = (640, 480),
+             n_channels: int = 3,
+             ) -> np.ndarray:
+    """
+    Load raw (unencoded) RGB-formatted video or image data, returning it 
+    with indices ordered as [t, y, x, c], where 't' and/or 'c' axes may be
+    absent depending on whether the data is a single image (no time axis) or
+    single-channel (no channel axis).
+    
+    """
+    
+    data = np.fromfile(str(path), dtype=np.uint8)
+    n_bytes = len(data)
+    n_xpix, n_ypix = resolution
+    bytes_per_frame = n_xpix * n_ypix * n_channels
+    n_frames, remainder = np.divmod(n_bytes, bytes_per_frame)
+    if n_frames < 1:
+        raise IOError("No frames found in file '{}'.".format(path))        
+    if remainder != 0:
+        raise IOError("Partial frames encountered in file '{}'.".format(path))
+
+    frame_shape = [n_ypix, n_xpix] if n_channels == 1 else [n_ypix, n_xpix, n_channels]
+    out_shape = frame_shape if n_frames == 1 else [n_frames] + frame_shape
+    
+    # Handle single frame.
+    if n_frames == 1:
+        return data.reshape(frame_shape)
+            
+    # Handle multiple frames (video).
+    mov = np.zeros(out_shape, dtype=np.uint8)
+    for i in range(n_frames):
+        frame_data = data[i * bytes_per_frame : (i + 1) * bytes_per_frame]
+        mov[i] = frame_data.reshape(frame_shape)
+    return mov        
+    
+
+def iterframes_h264(path) -> np.ndarray:
+    
+    cap = cv2.VideoCapture(str(path))
+    try:
+        while cap.isOpened():
+            ret, im = cap.read()
+            if not ret:
+                break
+            im = im[:, :, (2, 1 , 0)]
+            yield im
+
+    finally:
+        cap.release()
+
+
+def read_h264(path: PathLike) -> np.ndarray:
+    return np.array(list(iterframes_h264(path)))
 
         
+
+
 # URL and path handling.
+
 
 def fspath(url: URL) -> str:
     return os.fspath(url)
+
 
 def pathlike(obj: Any) -> bool:
     """Determine whether an object is interpretable as a filesystem path."""
     return isinstance(obj, (str, Path))        
 
-    
             
 def urlparse(url: URL,
              scheme: str = '',
@@ -182,42 +242,7 @@ def today() -> str:
 
         
         
-def load_raw(path: PathLike,
-             resolution: Tuple[int, int] = (640, 480),
-             n_channels: int = 3) -> np.ndarray:
-    """
-    Load raw (unencoded) RGB-formatted video or image data, returning it 
-    with indices ordered as [t, y, x, c], where 't' and/or 'c' axes may be
-    absent depending on whether the data is a single image (no time axis) or
-    single-channel (no channel axis).
-    
-    """
 
-    
-    data = np.fromfile(path, dtype=uint8)    
-    n_bytes = len(data)
-    n_xpix, n_ypix = resolution
-    bytes_per_frame = n_xpix * n_ypix * n_channels
-    n_frames, remainder = np.divmod(n_bytes, bytes_per_frame)
-    if n_frames < 1:
-        raise IOError("No frames found in file '{}'.".format(path))        
-    if remainder != 0:
-        raise IOError("Partial frames encountered in file '{}'.".format(path))
-
-    frame_shape = [n_ypix, n_xpix] if n_channels == 1 else [n_ypix, n_xpix, n_channels]
-    out_shape = frame_shape if n_frames == 1 else [n_frames] + frame_shape
-    
-    # Handle single frame.
-    if n_frames == 1:
-        return data.reshape(frame_shape)
-            
-    # Handle multiple frames (video).
-    mov = np.zeros(out_shape, dtype=uint8)
-    for i in range(n_frames):
-        frame_data = data[i * bytes_per_frame : (i + 1) * bytes_per_frame]
-        mov[i] = frame_data.reshape(frame_shape)
-    return mov        
-    
 
 
 
@@ -243,4 +268,20 @@ class DictProxy:
     def __getitem__(self, key: Any):
         return self._data[key]
 
+
+
+def repr_secs(secs):
+    """
+    """
+
+        
+    sign, secs = np.sign(secs), np.abs(secs)
+    if secs >= 1:
+        return sign * secs, 'sec.'
+    if secs >= 1e-3:
+        return sign * secs * 1e3, 'msec.'
+    elif secs >= 1e-6:
+        return sign * secs * 1e6, 'usec.'    
+    else:
+        return sign * secs * 1e9, 'nsec'
         

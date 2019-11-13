@@ -1,84 +1,56 @@
 import io
 import os
 from pathlib import Path
-import PIL
 import matplotlib.pyplot as plt
 import numpy as np
-from picamera import PiCamera
-from picamera.array import PiRGBArray
 from mesoimg import *
-import time
-
-plt.ion()
+import h5py
 
 
-
-def draw(mat):
-    global fig, ax, im, frame
-    if fig is None:
-        fig, ax = plt.subplots()
-    
-    images = ax.get_images()
-    if len(images) == 0:
-        im = ax.imshow(mat)
-        ax.set_aspect('equal')
-        return
-    assert len(images) == 1    
-    cur_shape = images[0].get_array().shape
-    if mat.shape == cur_shape:
-        im.set_data(frame)
-    else:
-        ax.clear()
-        im = ax.imshow(mat)
-    ax.set_aspect('equal')
-     
-
-def snap() -> np.ndarray:
-
-    global frame
-    try:
-        buf = PiRGBArray(cam)
-        cam.capture(buf, 'rgb', use_video_port=True)        
-        frame = buf.array
-        draw(frame)
-    except:
-        cam.close()
-        raise
+secs = 2
+SSD = True
+raw = True
+FPS = 40
+resolution = (640, 480)
 
 
-def record(n_frames = 30):
-
-    global frame
-    #buf = PiRGBArray(cam)
-    buf = io.BytesIO()
-    try:
-        frame_counter = 0
-        for foo in cam.capture_continuous(buf,
-                                          'rgb',
-                                          use_video_port=True):
-            #frame = buf.array
-            frame = buf.getvalue()
-            buf.seek(0)
-            buf.truncate(0)
-            frame_counter += 1
-            if frame_counter >= n_frames:
-                break
-            buf.seek(0)
-            buf.truncate(0)
-    except:
-        cam.close()
-        raise
-    #draw(frame)
-    return frame
-
-
-
-from mesoimg.camera import ImageBuffer
+#path = Path('/media/pi/HD1/') if SSD else Path('/home/pi/')
+#path = path / 'mov.raw' if raw else path / 'mov.h264'
+#format = 'rgb' if raw else 'h264'
+path = Path('/media/pi/HD1/mov.h5')
+if path.exists():
+    path.unlink()
 
 cam = Camera()
-buf = ImageBuffer(cam)
-im = cam.preview()
-#cam.close()
+
+out = FrameBuffer(cam)
+maxframes = int(secs * FPS * 1.1)
+out.connect(path, maxframes)
+
+cam.start_recording(out, 'rgb')
+cam.wait_recording(secs)
+cam.stop_recording()
+out.close()
+cam.close()
 
 
+ts = out.ts
+ts = out.out._timestamps
+n_frames = len(ts)
+print(f'{n_frames/secs}')
+
+f = h5py.File(path, 'r')
+dset = f['data']
+im = dset[20]
+f.close()
+plt.ion()
+plt.imshow(im)
+
+#if raw:
+#    mov = read_raw(path, resolution)
+#else:
+#    mov = read_h264(path)
+
+#n_frames = mov.shape[0]
+#print(f'{n_frames/secs}')
 
