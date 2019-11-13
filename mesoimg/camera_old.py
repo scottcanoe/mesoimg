@@ -7,7 +7,6 @@ import socket
 import time
 from typing import (Any,
                     Callable,
-                    ClassVar,
                     Iterable,
                     List,
                     Mapping,
@@ -17,7 +16,6 @@ from typing import (Any,
                     Union)
 
 import imageio
-import matplotlib.pyplot as plt
 import numpy as np
 import picamera
 from picamera.array import PiRGBArray
@@ -30,6 +28,168 @@ from mesoimg.common import (ArrayTransform,
                             squeeze)
 from mesoimg.timing import Clock, Timer
 from mesoimg.display import ImageViewer
+
+
+
+
+class Property:
+    
+    def __init__(self, key):
+        self.key = key
+    
+    def __get__(self, obj, cls=None):
+        if obj is None:
+            return self
+        return obj[self.key]
+    
+    def __set__(self, obj, val):
+        obj[self.key] = val
+    
+    def __del__(self, obj):
+        del obj[self.key]
+
+
+
+class CameraConfig(UserDict):
+    
+        
+    #: Width and height of imagery in pixels.
+    resolution = Property('resolution')
+    
+    #: Limiting framerate.
+    framerate = Property('framerate')
+    
+    #: Sensor mode indicates things like resolution, binning, etc.
+    sensor_mode = Property('sensor_mode')
+    
+    #: Whether to use RGB data rather than compressed representations.
+    raw = Property('raw')
+    
+    #: If in raw mode, define which channels to be discarded (if any).
+    channels = Property('channels')
+    
+    #: Analog gain controls.
+    exposure_mode = Property('exposure_mode')
+    
+    #: Last frame readout time (actually line readout time * num. lines). 
+    shutter_speed = Property('shutter_speed')
+    
+    #: White-balance mode.
+    awb_mode = Property('awb_mode')
+    
+    #: Two-tuple of white-balance gains (red, blue).
+    awb_gains = Property('awb_gains')
+    
+    #: Whether to use the video port (faster).
+    use_video_port = Property('use_video_port')
+
+    #: Whether to horizontally flip image (in GPU).
+    hflip = Property('hflip')
+    
+    #: Whether to vertically flip image (in GPU).
+    vflip = Property('vflip')
+                   
+    
+    _KEYS = [
+      'resolution',
+      'framerate',
+      'raw',
+      'channels',
+      'exposure_mode',
+      'shutter_speed',
+      'awb_mode',
+      'awb_gains',
+      'use_video_port',
+      'hflip',
+      'vflip',
+    ]
+    
+           
+    def __init__(self,
+                 config: Union[PathLike, Mapping] = 'default',
+                 **kw):
+        
+        # Initialize dict with defaults.
+        self.data = CAM_CONFIGS['default'].copy()
+                
+        # Update from a supplied dict/Config object.
+        if isinstance(config, (dict, CamConfig)):
+            self.data.update(config)
+                
+        # Update from a hard-coded setting.
+        elif config in CAM_CONFIGS.keys():
+            self.data.update(CAM_CONFIGS[config])
+
+        # Update from settings on disk.
+        else:
+            aux = read_json(config)
+            self.data.update(aux)
+        
+        # Finally, let any supplied keyword args override other values.
+        self.data.update(kw)
+
+        
+    def save(self, path: PathLike, **kw) -> None:
+        write_json(path, self.data, **kw)
+
+
+    def __repr__(self):
+        s  = '  Config  \n'
+        s += '----------\n'
+        for key in self._KEYS:
+            s += '{}: {}\n'.format(key, self.data[key])
+        return s
+
+
+
+
+# Define default config.
+#----------------------------------
+
+CAM_CONFIGS = {}
+
+CAM_CONFIGS['default'] = {
+    'resolution'     : None,
+    'framerate'      : None,
+    'sensor_mode'    : 0,
+    'raw'            : False,
+    'channels'       : 'rgb',
+    'exposure_mode'  : 'auto',
+    'shutter_speed'  : 0,
+    'awb_mode'       : 'auto',
+    'awb_gains'      : (0, 0),
+    'hflip'          : False,
+    'vflip'          : False,
+    'use_video_port' : True,
+}
+
+
+# Define still image formats.
+#----------------------------------
+CAM_CONFIGS['still'] = {
+    'use_video_port' : False,
+}
+
+
+# Define raw image/video formats.
+#----------------------------------
+
+CAM_CONFIGS['rgb'] = {
+    'resolution'     : (640, 480),
+    'framerate'      : 30.0,
+    'sensor_mode'    : 7,
+    'raw'            : True,
+    'channels'       : 'rgb',
+    'exposure_mode'  : 'fix',
+    'awb_mode'       : 'fix',
+    'use_video_port' : True,
+}
+
+for channel in ('r', 'g', 'b'):
+    d = CAM_CONFIGS['rgb'].copy()
+    d['channels'] = channel
+    CAM_CONFIGS[channel] = d
+
 
 
 
@@ -56,113 +216,66 @@ class Camera(picamera.PiCamera):
 
     """
 
-
-    default_channels: ClassVar[str] = 'rgb'
-
-    _capturing: bool = False
+    
     
     
     def __init__(self,
                  resolution: Tuple[int, int] = (640, 480),
                  framerate: float = 30.0,
                  sensor_mode: int = 7,
-                 channels: str = 'rgb',
-                 sleep: float = 2.0,
+                 sleep: float = 2,
                  **kw):
         
         logging.info('Initializing Camera.')
-                        
+        
         super().__init__(resolution=resolution,
                          framerate=framerate,
                          sensor_mode=sensor_mode)
-                         
-        self._capturing = False
         
-        # Set channel settings.
-        try:
-            self.channels = channels
-        except:
-            msg = f"Failed to initialize channels with '{channels}'. "
-            msg += "Falling back to default '{self._default_channels}'."
-            logging.critical(msg)
-            self._channels = self._default_channels
-        
-        if sleep:
-            time.sleep(sleep)
-            
+
     
-    @property
-    def channels(self) -> str:
-        return self._channels
-        
-    
-    @channels.setter
-    def channels(self, ch: str) -> None:
-
-        if self._capturing:
-            msg  = "Cannot modify 'channels' attribute "
-            msg += "while recording/previewing."
-            raise RuntimeError(msg)
-        
-        if ch not in ('r', 'g', 'b', 'rgb'):
-            msg = "'channels' must be one of 'r', g', 'b', "
-            msg += f"'rgb'. Not '{ch}.'"
-            raise ValueError(msg)
-
-        self._channels = ch
-        
-                
-    @property
-    def frame_shape(self) -> Tuple:
-        """
-        Get the frame shape in array dimension order.
-        The `channels` dimension will be omitted in single-channel mode.
-       
-        """        
-        n_xpix, n_ypix = self.resolution        
-        if len(self._channels) > 1:
-            return (n_ypix, n_xpix, len(self._channels))
-        return (n_ypix, n_xpix)
-                
-
     def preview(self):
         
         print("Starting preview", flush=True)
 
+        fig, ax = plt.subplots()
+        fig.subplots_adjust(bottom=0, top=1, left=0, right=1)
+        n_xpix, n_ypix = self.resolution
+        im = ax.imshow(np.zeros([n_ypix, n_xpix], dtype='u1'))
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])        
+        plt.pause(0.1)
+
         try:
-
-            self._capturing = True
-            shape = self.frame_shape
+            frame_counter = 0
             stream = io.BytesIO()
-            viewer = ImageViewer(self)
-
-            for foo in self.capture_continuous(stream,
+            for foo in cam.capture_continuous(buf,
                                               'rgb',
-                                               use_video_port=True):
+                                              use_video_port=True):
+                #frame = buf.array
+                #print(f'frame_counter: {frame_counter}')
+                frame = np.frombuffer(buf.getvalue(), dtype=dtype)
+                frame = frame.reshape([n_ypix, n_xpix, 3])
+                im.set_data(frame)
+                plt.pause(0.05)
 
-                frame = np.frombuffer(stream.getvalue(), dtype='u1')
-                frame = frame.reshape(shape)
-                viewer.update(frame)
-                stream.seek(0)
+                buf.seek(0)
+                buf.truncate(0)
+                frame_counter += 1
                 
-                if viewer.closed:
+                if not plt.fignum_exists(fig.number):
                     break
                                                                                 
         except Exception as exc:
 
             if not exc.__class__.__name__ == 'TclError':
-                self._capturing = False
-                stream.seek(0)
-                self.close()
+                cam.close()
                 raise
-        
-        self._capturing = False
-        stream.seek(0)
-        print("Preview finished.", flush=True)
+                
+        print("Preview stopped.", flush=True)
         
                         
-    
-    
     def capture(self,
                 out: Union[None, PathLike] = None,
                 show: bool = False,
@@ -326,11 +439,11 @@ class Camera(picamera.PiCamera):
 
         
 
-    #def _get_format(self, out: Any, config: Config) -> str:
-    #    pass
+    def _get_format(self, out: Any, config: Config) -> str:
+        pass
 
         
-    def _get_out_shape(self, out: Any) -> Sequence[int]:
+    def _get_out_shape(self, out: Any, config: Config) -> Sequence[int]:
 
         n_xpix, n_ypix = self.resolution
         if not config.raw or config.channels == 'rgb':
@@ -340,7 +453,8 @@ class Camera(picamera.PiCamera):
 
     
     
-    def _get_channel_extract(self) -> Optional[ArrayTransform]:
+    def _get_channel_extract(self,
+                                config: Config) -> Optional[ArrayTransform]:
         
         if not config.raw or config.channels == 'rgb':
             return None
@@ -441,6 +555,14 @@ Need input/output adapter.
 - If net streaming, make contiguous, and somehow include metadata.
 
 """
+
+
+
+
+
+
+
+
 
 
 

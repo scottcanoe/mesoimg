@@ -1,34 +1,15 @@
+from collections import OrderedDict
 import logging
 from typing import Any, Callable, Optional
-import time as _time
+import time
 import numpy as np
 
 
 __all__ = [
-    'time',
-    'today',
     'Clock',
     'Timer',
 ]
 
-
-def time() -> float:
-    """
-    Get current UNIX time. Wraps built-in ``time.time`` to keep all time
-    related functions in the same place to simplify imports.
-    """
-    return _time.time()
-
-
-sleep = _time.sleep
-
-
-def today() -> str:
-    """
-    Returns the ISO-formatted local date (e.g., 2019-11-08).
-    """
-    d = time.localtime()
-    return f'{d.tm_year}-{d.tm_mon:02}-{d.tm_mday:02}'
 
 
 
@@ -42,7 +23,7 @@ class Clock:
     def __init__(self,
                  *,
                  start: bool = True,
-                 time_fn: Callable[[], float] = _time.perf_counter):
+                 time_fn: Callable[[], float] = time.perf_counter):
 
         self._time_fn = time_fn
         self.reset()
@@ -110,13 +91,13 @@ class Clock:
 class Timer:
 
     """
-    Class to assist in timing intervals.
+    Class for ticking off intervals.
     """
     
     def __init__(self,
                  name: str = '',
                  verbose: bool = False,
-                 time_fn: Callable[[], float] = _time.perf_counter,
+                 time_fn: Callable[[], float] = time.perf_counter,
                  logger: Optional[logging.Logger] = None):
 
         self._name = name
@@ -140,51 +121,88 @@ class Timer:
         return self._timestamps
 
         
-    def reset(self) -> 'Timer':
+    def reset(self) -> None:
+        """
+        Reset all attributes regardless of whether timer is running.
+        """
         self._t_start = None
         self._t_stop = None
         self._running = False
         self._timestamps = []
+        self._stats = None
                         
                     
-    def start(self) -> 'Timer':
+    def start(self, tic: bool = False) -> float:
+        """
+        Start the timer. Set ``tic=True`` to include to start
+        the timestamp array with a zero.
+        
+        Returns 0.
+        
+        """
         self.check_not_running()
-        self._t_start = self._time_fn()
-        self._timestamps = [0]
         self._running = True
-        return self
+        self._t_start = self._time_fn()
+        if tic:
+            self._timestamps = [0]
+        return 0
             
-    def tic(self) -> 'Timer':
+            
+    def tic(self) -> float:
         self.check_running()
         t = self._time_fn() - self._t_start
         self._timestamps.append(t)
         return self
 
-    def stop(self) -> 'Timer':
+
+    def stop(self, tic: bool = False) -> float:
+        """
+        Stop the timer. Set ``tic=True`` to append timestamps
+        with stop time. Prints a summary if verbose.
+        """
         self.check_running()
-        self._t_stop = self._time_fn()
         self._running = False
+        self._t_stop = self._time_fn()
+        if tic:
+            self._timestamps.append(self._t_stop)
         self._timestamps = np.array(self._timestamps)
+
+        stats = OrderedDict()
+        stats['duration'] = self._t_stop
+        intervals = np.ediff1d(self._timestamps)
+        stats['mean'] = np.mean(intervals) 
+        stats['median'] = np.median(intervals)
+        stats['min'] = np.min(intervals)
+        stats['max'] = np.max(intervals)
+        self.stats = stats
+        
         if self._verbose:
             self.print_summary()
 
 
     def check_running(self) -> None:
+        """Raise ``RuntimeError`` if not running."""
         if not self._running:
             raise RuntimeError('Timer is not running.')
 
 
-    def check_not_running(self) -> None:    
+    def check_not_running(self) -> None:
+        """Raise ``RuntimeError`` if running."""
         if self._running:
             raise RuntimeError('Timer is running.')
 
 
     def print_summary(self) -> None:
-        s = "<Timer "
+        """Print some timestamps info."""
+
         if self.name:
-            s = f"Timer('{self.name}') finished: "
+            s = f"<Timer('{self.name}')"
         else:            
-            s = "<Timer finished: "        
-        s += f'time={self._t_stop} sec.>'
+            s = "<Timer"
+        s += f" finished in {self._t_stop} secs. Intervals: "
+        strings = []
+        for key, val in self.stats.items():
+            strings.append(f'{key}={val}')
+        s += ', '.join(strings) + '>'
         print(s, flush=True)
         

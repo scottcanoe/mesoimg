@@ -1,7 +1,18 @@
 import os
+import pathlib
 from pathlib import Path
+import select
+import sys
 import time
-from typing import Any, Callable, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import (Any,
+                    Callable,
+                    ItemsView,
+                    KeysView,
+                    Mapping,
+                    Optional,
+                    Tuple,
+                    Union,
+                    ValuesView)
 import urllib.parse
 import numpy as np
 
@@ -11,7 +22,7 @@ __all__ = [
     # Constants/type hints.
     'ArrayTransform',
     'PathLike',
-    'URLLike',
+    'URL',
     'uint8',
     
     # OS/filesystem.
@@ -23,20 +34,32 @@ __all__ = [
     'write_text',
     
     # URL/path handling.
+    'fspath',
     'pathlike',
-    'urllike',
-    'parse_url',
+    'urlparse',
 
+    # User interaction.
+    'stdin_ready',
+    'read_stdin',
+    
     # etc.
     'squeeze',
+    'today',
+    'DictProxy',
 ]
 
 
 # Define useful constants.
 ArrayTransform = Callable[[np.ndarray], np.ndarray]
 PathLike = Union[str, Path]
-URL = Union[str, bytes, Path, urllib.parse.ParseResult]
-uint8 = np.dtype('>u1')
+URL = Union[str, Path, urllib.parse.ParseResult]
+uint8 = np.dtype('u1')
+
+
+
+"""
+OS/filesystem utilities.
+"""
 
 # Collect info about raspbian.
 if os.path.exists('/etc/os-release'):
@@ -46,14 +69,6 @@ if os.path.exists('/etc/os-release'):
     for ln in lines:
         key, val = ln.split('=')
         _PI_INFO[key.strip()] = val.strip()
-else:
-    _PI_INFO = None
-
-
-
-"""
-OS/filesystem utilities.
-"""
 
 
 def pi_info():
@@ -99,62 +114,16 @@ def write_text(path: PathLike, text: str) -> None:
         
 # URL and path handling.
 
+def fspath(url: URL) -> str:
+    return os.fspath(url)
+
 def pathlike(obj: Any) -> bool:
     """Determine whether an object is interpretable as a filesystem path."""
-    try:
-        return isinstance(obj, (str, Path))
-    except:
-        return False
-        
+    return isinstance(obj, (str, Path))        
 
-def urllike(obj: Any) -> bool:
-    """Determine whether an object is interpretable as a filesystem path."""
-    if pathlike(obj) or isinstance(obj, (ParseResult, URL)):
-        return True
-    return False        
-
-
-
-class DictView:
-
-    def __init__(self, data: Mapping):
-        self._data = data
-
-    def keys(self):
-        return self._data.keys()
-
-    def values(self):
-        return self._data.values()
-
-    def items(self):
-        return self._data.items()
-
-    def pop(self, key):
-        raise TypeError('Cannot modify DictView')
-                
-    def update(self, other: Mapping):
-        raise TypeError('Cannot modify DictView')
-
-    def __getitem__(self, key):
-        return self._data[key]
-    
-    def __setitem__(self, key, val):
-        raise TypeError('Cannot modify DictView')
-        
-    def __delitem__(self, key):
-        raise TypeError('Cannot modify DictView')
-    
-    def __contains__(self, key):
-        return key in self.keys()
-        
-    def __len__(self):
-        return len(self._data)
-
-
-    
     
             
-def urlparse(url: PathLike,
+def urlparse(url: URL,
              scheme: str = '',
              ) -> urllib.parse.ParseResult:
     """
@@ -173,7 +142,28 @@ def urlparse(url: PathLike,
     return res
                 
 
-# etc.        
+
+# User interaction.
+
+def stdin_ready(timeout: float = 0.0) -> bool:
+    """
+    Determine whether stdin has at least one line available to read.
+    """
+    return select.select([sys.stdin], [], [], timeout)[0] == []
+
+
+def read_stdin(timeout: float = 0.0) -> str:
+    """
+    Reads a line from stdin, if any. If no lines available, the empty
+    string is returned.
+    """
+    if select.select([sys.stdin], [], [], timeout)[0]:
+        return sys.stdin.readline()
+    return ''
+
+
+# etc.
+
 
 def squeeze(arr: np.ndarray) -> np.ndarray:
     """
@@ -183,6 +173,12 @@ def squeeze(arr: np.ndarray) -> np.ndarray:
     return np.squeeze(arr) if 1 in arr.shape else arr
     
         
+def today() -> str:
+    """
+    Returns the ISO-formatted local date (e.g., 2019-11-08).
+    """
+    d = time.localtime()
+    return f'{d.tm_year}-{d.tm_mon:02}-{d.tm_mday:02}'
 
         
         
@@ -225,8 +221,26 @@ def load_raw(path: PathLike,
 
 
 
+class DictProxy:
+    """
+    Wrapper to make dictionaries immutable.
+    """
+    def __init__(self, data: Mapping):
+        self._data = data
 
+    #-------------------------------------------#
+    # Accessors
+    
+    def keys(self) -> KeysView:
+        return self._data.keys()
 
+    def values(self) -> ValuesView:
+        return self._data.values()
 
+    def items(self) -> ItemsView:
+        return self._data.items()
 
+    def __getitem__(self, key: Any):
+        return self._data[key]
 
+        

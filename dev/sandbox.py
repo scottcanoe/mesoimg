@@ -1,31 +1,84 @@
+import io
 import os
 from pathlib import Path
+import PIL
+import matplotlib.pyplot as plt
 import numpy as np
-from mesoimg.timing import time, sleep, Timer
+from picamera import PiCamera
+from picamera.array import PiRGBArray
+from mesoimg import *
+import time
 
-dtype = np.dtype('u1')
-
-path = Path.home() / 'test.raw'
-n_ypix, n_xpix = 640, 480
-n_frames = 1000
-
-bytes_per_frame = n_xpix * n_ypix
-bufsize = -1
+plt.ion()
 
 
-mov = np.empty([n_frames, n_ypix, n_xpix], dtype=dtype)
-#arr = mov.tobytes()
 
-f = open(path, 'wb')
-try:
+def draw(mat):
+    global fig, ax, im, frame
+    if fig is None:
+        fig, ax = plt.subplots()
     
-    tm = Timer('tm', verbose=True).start()
-    for i in range(n_frames):
-        f.write(mov[i])
-        tm.tic()
-    tm.stop()
-except:
-    f.close()
-    raise
+    images = ax.get_images()
+    if len(images) == 0:
+        im = ax.imshow(mat)
+        ax.set_aspect('equal')
+        return
+    assert len(images) == 1    
+    cur_shape = images[0].get_array().shape
+    if mat.shape == cur_shape:
+        im.set_data(frame)
+    else:
+        ax.clear()
+        im = ax.imshow(mat)
+    ax.set_aspect('equal')
+     
 
-f.close()
+def snap() -> np.ndarray:
+
+    global frame
+    try:
+        buf = PiRGBArray(cam)
+        cam.capture(buf, 'rgb', use_video_port=True)        
+        frame = buf.array
+        draw(frame)
+    except:
+        cam.close()
+        raise
+
+
+def record(n_frames = 30):
+
+    global frame
+    #buf = PiRGBArray(cam)
+    buf = io.BytesIO()
+    try:
+        frame_counter = 0
+        for foo in cam.capture_continuous(buf,
+                                          'rgb',
+                                          use_video_port=True):
+            #frame = buf.array
+            frame = buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+            frame_counter += 1
+            if frame_counter >= n_frames:
+                break
+            buf.seek(0)
+            buf.truncate(0)
+    except:
+        cam.close()
+        raise
+    #draw(frame)
+    return frame
+
+
+
+
+
+
+cam = Camera()
+cam.preview()
+#cam.close()
+
+
+
