@@ -126,13 +126,15 @@ class Timer:
         Reset all attributes regardless of whether timer is running.
         """
         self._t_start = None
+        self._start_included = None
         self._t_stop = None
+        self._stop_included = None
         self._running = False
         self._timestamps = []
         self._stats = None
                         
                     
-    def start(self, tic: bool = False) -> float:
+    def start(self, include: bool = False) -> float:
         """
         Start the timer. Set ``tic=True`` to include to start
         the timestamp array with a zero.
@@ -143,8 +145,11 @@ class Timer:
         self.check_not_running()
         self._running = True
         self._t_start = self._time_fn()
-        if tic:
+        if include:
+            self._start_included = True
             self._timestamps = [0]
+        else:
+            self._start_included = False
         return 0
             
             
@@ -155,26 +160,21 @@ class Timer:
         return self
 
 
-    def stop(self, tic: bool = False) -> float:
+    def stop(self, include: bool = False) -> float:
         """
         Stop the timer. Set ``tic=True`` to append timestamps
         with stop time. Prints a summary if verbose.
         """
         self.check_running()
         self._running = False
-        self._t_stop = self._time_fn()
-        if tic:
+        self._t_stop = self._time_fn() - self._t_start
+        if include:
+            self._stop_included = True
             self._timestamps.append(self._t_stop)
+        else:
+            self._stop_included = False
+            
         self._timestamps = np.array(self._timestamps)
-
-        stats = OrderedDict()
-        stats['duration'] = self._t_stop
-        intervals = np.ediff1d(self._timestamps)
-        stats['mean'] = np.mean(intervals) 
-        stats['median'] = np.median(intervals)
-        stats['min'] = np.min(intervals)
-        stats['max'] = np.max(intervals)
-        self.stats = stats
         
         if self._verbose:
             self.print_summary()
@@ -195,14 +195,41 @@ class Timer:
     def print_summary(self) -> None:
         """Print some timestamps info."""
 
+
         if self.name:
-            s = f"<Timer('{self.name}')"
-        else:            
-            s = "<Timer"
-        s += f" finished in {self._t_stop} secs. Intervals: "
-        strings = []
-        for key, val in self.stats.items():
-            strings.append(f'{key}={val}')
-        s += ', '.join(strings) + '>'
+            s = f"Timer('{self.name}')\n"
+        else:
+            s = "     Timer     \n"
+        s += '-' * (len(s) - 1) + '\n'
+
+        ts = self.timestamps        
+        n_tics = len(ts)
+        t_stop = self._t_stop
+        tics_per_sec = n_tics / t_stop
+        periods = np.ediff1d(ts)
+        
+        s += f'time: {t_stop}\n'      
+        s += f'tics: {n_tics}\n'
+        s += f'tics/sec: {tics_per_sec}\n'
+        for stat_name in ('mean', 'median', 'min', 'max'):
+            fn = getattr(np, stat_name)
+            stat = fn(periods)
+            s += f'{stat_name}: {stat}\n'
+                        
         print(s, flush=True)
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
+        
         

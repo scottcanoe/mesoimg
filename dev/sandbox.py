@@ -73,11 +73,11 @@ def record(n_frames = 30):
 
 
 
-
-
+from mesoimg.camera import ImageBuffer
 
 cam = Camera()
-cam.preview()
+buf = ImageBuffer(cam)
+im = cam.preview()
 #cam.close()
 
 

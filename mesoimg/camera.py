@@ -20,7 +20,7 @@ import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import picamera
-from picamera.array import PiRGBArray
+from picamera.array import bytes_to_rgb, raw_resolution
 from mesoimg.common import (ArrayTransform,
                             PathLike,
                             uint8,
@@ -34,8 +34,67 @@ from mesoimg.display import ImageViewer
 
 
 
+class ImageBuffer(io.BytesIO):
 
+    """
+    Image buffer for unencoded video.
+    
+    """
+    
+    def __init__(self, cam: 'Camera'):
+        super(ImageBuffer, self).__init__()
+        self.cam = cam
+        self.array = None
 
+        # Compute channel slice.
+        ch = cam.channels
+        if ch in ('r', 'g', 'b'):
+            ch_slice = 'rgb'.find(ch)
+        elif ch == 'rgb':
+            ch_slice = slice(None)
+        else:
+            raise NotImplementedError
+        
+        # Compute planar slice, including channel slice.
+        width, height = cam.resolution
+        fwidth, fheight = raw_resolution(cam.resolution)        
+        if (width == fwidth) and (height == fheight):
+            fslice = (slice(None),   slice(None),  ch_slice)
+        else:
+            fslice = (slice(height), slice(width), ch_slice)
+        
+        # Make reshaping function.
+        self._reshape = lambda arr : arr.reshape([fheight, fwidth, 3])[fslice]
+        
+            
+
+    def close(self) -> None:
+        super(ImageBuffer, self).close()
+        self.array = None
+
+    
+    def truncate(self, size: Optional[None] = None) -> None:
+        if size is not None:
+            raise TypeError("Non-none truncation not allowed")
+        super(ImageBuffer, self).truncate(None)
+        raise NotImplementedError
+
+        
+    
+    def flush(self):
+        super(ImageBuffer, self).flush()
+        
+        # Reshape the array.
+        self.array = self._reshape(np.frombuffer(self.getvalue(),
+                                                 dtype=np.uint8))
+
+        # Rewind the buffer.
+        self.seek(0)
+        #self.truncate()  # do this?
+
+        
+    
+        
 
 
 
@@ -132,21 +191,53 @@ class Camera(picamera.PiCamera):
         try:
 
             self._capturing = True
-            shape = self.frame_shape
-            stream = io.BytesIO()
             viewer = ImageViewer(self)
+            stream = ImageBuffer(self)
+            tm = Timer(verbose=True)
+            tm.start(include=True)
+            for foo in self.capture_continuous(stream,
+                                               'rgb',
+                                               use_video_port=True):
 
+                frame = stream.array
+                viewer.update(frame)
+                tm.tic()
+                if viewer.closed:
+                    break
+                                                                                
+        except Exception as exc:
+
+            if not exc.__class__.__name__ == 'TclError':
+                self._capturing = False
+                tm.stop()
+                self.close()
+                raise
+        
+        self._capturing = False
+        tm.stop()
+        
+        print("Preview finished.", flush=True)
+        return stream
+        
+                        
+    def rec(self):
+        
+        print("Starting rec", flush=True)
+
+        try:
+
+            self._capturing = True
+            stream = ImageBuffer(self)
+            tm = Timer(verbose=True)
+            tm.start(tic=True)
+            
             for foo in self.capture_continuous(stream,
                                               'rgb',
                                                use_video_port=True):
-
-                frame = np.frombuffer(stream.getvalue(), dtype='u1')
-                frame = frame.reshape(shape)
-                viewer.update(frame)
+                
+                frame = stream.array
                 stream.seek(0)
                 
-                if viewer.closed:
-                    break
                                                                                 
         except Exception as exc:
 
@@ -160,8 +251,7 @@ class Camera(picamera.PiCamera):
         stream.seek(0)
         print("Preview finished.", flush=True)
         
-                        
-    
+            
     
     def capture(self,
                 out: Union[None, PathLike] = None,

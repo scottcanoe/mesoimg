@@ -2,7 +2,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import imageio
-from mesoimg.common import PathLike, fspath
+from mesoimg.common import PathLike
 
 
 
@@ -27,18 +27,23 @@ class ImageViewer:
 
         plt.pause(0.1)
     
+    
     @property
     def closed(self):        
         return not plt.fignum_exists(self.fig.number)
+    
     
     def update(self, data: np.ndarray, wait: float = 0.05) -> None:        
         self.im.set_data(data)
         plt.pause(wait)
         
+
     def save(self, path: PathLike) -> None:
 
         path = str(path) if isinstance(path, Path) else path
         data = np.array(self.im.get_array())
+        imageio.imwrite(path, data)
+        
                 
         
     
