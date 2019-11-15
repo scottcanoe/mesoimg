@@ -1,3 +1,4 @@
+from collections import namedtuple
 import os
 import pathlib
 from pathlib import Path
@@ -7,6 +8,7 @@ import time
 from typing import (Any,
                     Callable,
                     ItemsView,
+                    Iterable,
                     KeysView,
                     Mapping,
                     Optional,
@@ -21,9 +23,9 @@ __all__ = [
 
     # Constants/type hints.
     'ArrayTransform',
+    'DType',
     'PathLike',
     'URL',
-    'uint8',
     
     # OS/filesystem.
     'pi_info',
@@ -54,10 +56,9 @@ __all__ = [
 
 # Define useful constants.
 ArrayTransform = Callable[[np.ndarray], np.ndarray]
-PathLike = Union[str, Path]
-URL = Union[str, Path, urllib.parse.ParseResult]
-uint8 = np.dtype('u1')
-
+DType = Union[str, type, np.dtype]
+PathLike = Union[str, pathlib.Path]
+URL = Union[str, pathlib.Path, urllib.parse.ParseResult]
 
 
 """
@@ -242,7 +243,44 @@ def today() -> str:
 
         
         
+class Channels:
+    
+    
+    _string: str
+    _index: Union[int, slice]
+    
+    def __init__(self, obj: Union[str, Iterable[str], 'Channels']):
+        
+        if isinstance(obj, Channels):
+            self._string = obj._string
+            self._index = obj._index
+        else:
+            string = ''.join(c.lower() for c in obj)
+            if string in ('r', 'g', 'b'):
+                index = 'rgb'.find(string)
+            elif string == 'rgb':
+                index = slice(None)
+            else:
+                raise ValueError(f"Unsupported channels '{obj}'.")
+            self._string = string
+            self._index = index
+    
+        
+    @property
+    def string(self):
+        return self._string
+    
+    @property
+    def index(self):
+        return self._index
+            
+    def __repr__(self):
+        return self._string
 
+    def __str__(self):
+        return self._string
+    
+    
 
 
 
@@ -285,3 +323,45 @@ def repr_secs(secs):
     else:
         return sign * secs * 1e9, 'nsec'
         
+
+
+class Channels:
+    
+    
+    _string: str
+    _index: Union[int, slice]
+    
+    def __init__(self, obj: Union[str, Iterable[str], 'Channels']):
+        
+        if isinstance(obj, Channels):
+            self._string = obj._string
+            self._index = obj._index
+        else:
+            string = ''.join(c.lower() for c in obj)
+            if string in ('r', 'g', 'b'):
+                index = 'rgb'.find(string)
+            elif string == 'rgb':
+                index = slice(None)
+            else:
+                raise ValueError(f"Unsupported channels '{obj}'.")
+            self._string = string
+            self._index = index
+    
+        
+    @property
+    def string(self):
+        return self._string
+    
+    @property
+    def index(self):
+        return self._index
+            
+    def __repr__(self):
+        return self._string
+
+    def __str__(self):
+        return self._string
+    
+
+
+

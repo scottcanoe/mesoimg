@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import imageio
 from mesoimg.common import PathLike
-
+from mesoimg.outputs import Frame
 
 
 class ImageViewer:
@@ -33,9 +33,9 @@ class ImageViewer:
         return not plt.fignum_exists(self.fig.number)
     
     
-    def update(self, data: np.ndarray, wait: float = 0.05) -> None:        
-        self.im.set_data(data)
-        plt.pause(wait)
+    def update(self, frame: Frame, pause: float = 0.05) -> None:        
+        self.im.set_data(frame.data)
+        plt.pause(pause)
         
 
     def save(self, path: PathLike) -> None:

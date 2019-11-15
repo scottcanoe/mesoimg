@@ -2,12 +2,14 @@ from collections import OrderedDict
 import logging
 from typing import Any, Callable, Optional
 import time
+from time import perf_counter
 import numpy as np
 from .common import repr_secs
 
 
 __all__ = [
     'Clock',
+    'master_clock',
     'IntervalTimer',
 ]
 
@@ -17,77 +19,30 @@ __all__ = [
 class Clock:
 
     """
-    Class to assist in timing intervals.
     """
     
     
-    def __init__(self,
-                 *,
-                 start: bool = True,
-                 time_fn: Callable[[], float] = time.perf_counter):
+    def __init__(self):
+        self._t_start = perf_counter()
 
-        self._time_fn = time_fn
-        self.reset()
-        if start:
-            self.start()
-
-
-    @property
-    def running(self) -> bool:
-        return self._running
-        
 
     def reset(self) -> None:
-        self._t_start = None
-        self._t_stop = None
-        self._running = False
-        
-        
-    def restart(self) -> float:
-        self.check_running()
-        self.reset()
-        return self.start()
-        
+        self._t_start = perf_counter()
 
-    def start(self) -> float:
-        """
-        Start the clock. Returns 0.
-        """
-        self.check_not_running()
-        self._t_start = self._time_fn()
-        self._running = True
-        return 0
-        
-        
-    def time(self) -> float:
+
+    def tic(self) -> float:
         """
         Get the clock's current time.
-        """
-        self.check_running()
-        t = self._time_fn() - self._t_start
-        return t
+        """           
+        return perf_counter() - self._t_start
+
+    def __call__(self):
+        return perf_counter() - self._t_start
 
 
-    def stop(self) -> float:
-        """
-        Stop the clock.
-        """
-        self._t_stop = self.time()
-        self._running = False
-        return self._t_stop
-
-        
-
-    def check_running(self) -> None:
-        if not self._running:
-            raise RuntimeError('Clock is not running.')
+master_clock = Clock()
 
 
-    def check_not_running(self) -> None:
-        if self._running:
-            raise RuntimeError('Clock is running.')
-        
-    
 
 class IntervalTimer:
 
