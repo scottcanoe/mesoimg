@@ -8,7 +8,7 @@ import numpy as np
 from picamera.array import raw_resolution
 from mesoimg.common import PathLike
 from mesoimg.timing import Clock, master_clock
-from mesoimg.errors import *
+import zmq
 
 
 __all__ = [
@@ -36,21 +36,11 @@ class FrameBuffer(io.BytesIO):
     """
     
     
-    def __init__(self,
-                 cam: 'Camera',
-                 outfile: Optional['FrameStream'] = None,
-                 clock: Optional[Clock] = None,
-                 ):        
+    def __init__(self, cam: 'Camera'):        
         super().__init__()
 
         # Basic attributes and their thread lock.
         self._cam = cam    
-        self._frame = None
-        self._frame_counter = 0
-        self._clock = clock if clock else master_clock
-        self._outfile = outfile
-        self._closed = False
-        self._lock = Lock()
                         
         # Initialize reshaping parameters.
         # In raw input mode, the sensor sends us data with resolution
@@ -80,25 +70,7 @@ class FrameBuffer(io.BytesIO):
                 
         self._n_bytes_in = np.prod(self._in_shape)
         self._n_bytes_out = np.prod(self._out_shape)
-        
-        
-    @property
-    def closed(self) -> bool:
-        return self._closed  
-
-    @property
-    def frame(self) -> Frame:
-        return self._frame
-           
-    @property
-    def outfile(self) -> 'FrameStream':
-        return self._outfile
-    
-    @outfile.setter
-    def outfile(self, out: 'FrameStream') -> None:
-        with self._lock:
-            self._outfile = out
-     
+                           
 
     def write(self, data: bytes) -> int:
         """
@@ -126,37 +98,20 @@ class FrameBuffer(io.BytesIO):
         # Reshape the data from the buffer.
         data = np.frombuffer(self.getvalue(), dtype=np.uint8)
         data = data.reshape(self._in_shape)[self._out_slice]
-        frame = Frame(data=data,
-                      index=self._frame_counter,
-                      timestamp=self._clock())
-                    
-        # Set new frame.
-        with self._lock:
-            self._frame = frame
-            self._frame_counter += 1
-                                    
-        # Write to file.
-        if self._outfile:
-            ret = self._outfile.write(frame)
-            if ret == 0:
-                with self._cam.lock:
-                    self._cam.write_complete = True
 
         # Notify camera of new frame.
-        self._cam._write_callback(frame)
+        self._cam._write_callback(data)
                 
         # Finally, rewind the buffer and return as usual.
         self.seek(0)
         return n_bytes
         
         
-    def flush(self):
+    def flush(self) -> None:
         super().flush()
-        if self._outfile:
-            self._outfile.flush()
-  
-    
-    def close(self) -> None:           
+      
+      
+    def close(self) -> None:
         self.flush()
         super().close()
         
@@ -213,7 +168,7 @@ class H5WriteStream(FrameStream):
                 
         self._data = self._file.create_dataset('data', shape, dtype=dtype)
         self._data.attrs['n_frames'] = 0
-        self._ts = self._file.create_dataset('timestamps', (shape[0],), dtype=float)
+        self._ts = self._file.create_dataset('timestamps',(shape[0],), dtype=float)
         
         self._index = 0
         self._max_frames = shape[0]
