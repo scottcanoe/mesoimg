@@ -1,14 +1,14 @@
 from collections import namedtuple
 import io
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock
 from typing import Optional, Union, Sequence
 import h5py
 import numpy as np
 from picamera.array import raw_resolution
-from mesoimg.common import Channels, PathLike
-from mesoimg.timing import Clock
-
+from mesoimg.common import PathLike
+from mesoimg.timing import Clock, master_clock
+from mesoimg.errors import *
 
 
 __all__ = [
@@ -36,111 +36,142 @@ class FrameBuffer(io.BytesIO):
     """
     
     
-    
     def __init__(self,
                  cam: 'Camera',
-                 out: Optional['FrameStream'] = None,
-                 channels: Optional[Union[str, Channels]] = None,                 
+                 outfile: Optional['FrameStream'] = None,
                  clock: Optional[Clock] = None,
-                 ):
-        
+                 ):        
         super().__init__()
-        
-        self._cam = cam
-        self._out = out
-        self._channels = Channels(channels) if channels else cam.channels
-        self._clock = Clock() if clock else cam.clock
-        self._frame_counter = 0
+
+        # Basic attributes and their thread lock.
+        self._cam = cam    
         self._frame = None
-        self.lock = Lock()
-                
+        self._frame_counter = 0
+        self._clock = clock if clock else master_clock
+        self._outfile = outfile
+        self._closed = False
+        self._lock = Lock()
+                        
         # Initialize reshaping parameters.
         # In raw input mode, the sensor sends us data with resolution
         # rounded up to nearest multiples of 16 or 32. Find this input,
         # which will be used for the initial reshaping of the data.
-        fwidth, fheight = raw_resolution(self._cam.resolution)
+        fwidth, fheight = raw_resolution(cam.resolution)
         self._in_shape = (fheight, fwidth, 3)
-
 
         # Once reshaped, any extraneous rows or columns introduced
         # by the rounding up of the frame shape will need to be
         # sliced off. Additionally, any unwanted channels will
         # need to be removed, so we'll combine the two cropping
         # procedures into one.
-        width, height = self._cam.resolution
-        self._out_shape = (height, width, len(self._channels))
-
-        if self._in_shape == self._out_shape:
-            self._out_slice = (slice(None),   slice(None),  self._channels.index)
+        width, height = cam.resolution
+        channels = cam.channels                    
+        if channels in ('r', 'g', 'b'):
+            ch_index = 'rgb'.find(channels)
+            self._out_shape = (height, width)
         else:
-            self._out_slice = (slice(height), slice(width), self._channels.index)
+            ch_index = slice(None)
+            self._out_shape = (height, width, 3)
         
+        if self._in_shape == self._out_shape:
+            self._out_slice = (slice(None),   slice(None),  ch_index)
+        else:
+            self._out_slice = (slice(height), slice(width), ch_index)
+                
+        self._n_bytes_in = np.prod(self._in_shape)
+        self._n_bytes_out = np.prod(self._out_shape)
+        
+        
+    @property
+    def closed(self) -> bool:
+        return self._closed  
 
-    
     @property
     def frame(self) -> Frame:
         return self._frame
-
+           
+    @property
+    def outfile(self) -> 'FrameStream':
+        return self._outfile
     
+    @outfile.setter
+    def outfile(self, out: 'FrameStream') -> None:
+        with self._lock:
+            self._outfile = out
+     
+
     def write(self, data: bytes) -> int:
         """
-        Called by the encoder to write sensor data to the buffer.
-        If the frame is complete, sets the `array` attribute
-        with the newly read buffer data.
+        Reads and reshapes the buffer into an ndarray, and sets the
+        `_frame` attribute with the new array along with its index
+        and timestamp.
+                
+        Sets the camera's `new_frame` event.
+        If dumping to a file and writing is complete, sets
+        the camera's `write_complete` event.
+        
         """
         
         # Write the bytes to the buffer.
         n_bytes = super().write(data)
 
         # If an entire frame is complete, dispatch it.
-        if self._cam.frame.complete:
-            
-            # Reshape the data from the buffer.
-            data = np.frombuffer(self.getvalue(), dtype=np.uint8)
-            data = data.reshape(self._in_shape)[self._out_slice]
-            frame = Frame(data=data,
-                          index=self._frame_counter,
-                          timestamp=self._clock())
-                        
-            # Set attributes, and trigger callback.
-            with self.lock:
-                self._frame = frame
-                self._frame_counter += 1
-
-            # Optionally write to file.
-            if self._out:
-                self._out.write(frame)
+        bytes_available = self.tell()
+        if bytes_available < self._n_bytes_in:
+            print('not full frame', flush=True)
+            return n_bytes
+        if bytes_available > self._n_bytes_in:
+            raise IOError('too many bytes')
+                                
+        # Reshape the data from the buffer.
+        data = np.frombuffer(self.getvalue(), dtype=np.uint8)
+        data = data.reshape(self._in_shape)[self._out_slice]
+        frame = Frame(data=data,
+                      index=self._frame_counter,
+                      timestamp=self._clock())
+                    
+        # Set new frame.
+        with self._lock:
+            self._frame = frame
+            self._frame_counter += 1
                                     
-            # 'Reset' the buffer, and alert camera to new frame.
-            self.seek(0)
-            self._cam._new_frame_callback(frame)
+        # Write to file.
+        if self._outfile:
+            ret = self._outfile.write(frame)
+            if ret == 0:
+                with self._cam.lock:
+                    self._cam.write_complete = True
+
+        # Notify camera of new frame.
+        self._cam._write_callback(frame)
                 
-        # Finally, return number of bytes written as usual.
+        # Finally, rewind the buffer and return as usual.
+        self.seek(0)
         return n_bytes
         
-
         
     def flush(self):
         super().flush()
-        self._frame = None
-        if self._out:
-            self._out.flush()
+        if self._outfile:
+            self._outfile.flush()
   
     
-    def close(self) -> None:
+    def close(self) -> None:           
         self.flush()
-        super().close()            
-        if self._out:
-            self._out.close()
+        super().close()
         
-
 
 
 class FrameStream:
 
-    _closed: bool
-    _path: Path
-    
+    #complete: Event
+    #_closed: bool
+    #_path: Path
+        
+    def __init__(self, path: PathLike):
+        self._path = Path(path)
+        self._closed = False
+        self.complete = Event()
     
     @property
     def closed(self) -> bool:
@@ -162,7 +193,7 @@ class FrameStream:
     def flush(self):
         pass
 
-    def close(self):
+    def close(self, flush=True):
         raise NotImplementedError
 
 
@@ -173,31 +204,40 @@ class H5WriteStream(FrameStream):
     def __init__(self,
                  path: PathLike,
                  shape: Sequence[int],
-                 dtype: Union[str, type] = np.uint8,
+                 dtype: Union[str, type],
                  ):
 
-        self._path = Path(path)        
+        self._path = Path(path)
         self._file = h5py.File(str(self.path), 'w')
         self._closed = False
-        
+                
         self._data = self._file.create_dataset('data', shape, dtype=dtype)
         self._data.attrs['n_frames'] = 0
         self._ts = self._file.create_dataset('timestamps', (shape[0],), dtype=float)
         
         self._index = 0
-            
+        self._max_frames = shape[0]
+        self.complete = Event()    
+        
             
     @property
     def path(self):
         return self._path
             
+    
     def tell(self):
-        return self._data.attrs['index']
+        return self._data.attrs['n_frames']
+    
     
     def write(self, frame: Frame) -> int:
         """
         The client calls this to dump data.
         """
+
+        # Check for out-of-bounds.
+        if self._index >= self._max_frames:
+            self.complete.set()
+            return 0
         
         # Write the frame and timestamp.
         self._data[self._index] = frame.data
@@ -211,6 +251,7 @@ class H5WriteStream(FrameStream):
         
     def flush(self):
         self._file.flush()
+
 
     def close(self):
         self.flush()

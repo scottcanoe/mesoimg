@@ -19,28 +19,33 @@ __all__ = [
 class Clock:
 
     """
+    Clock/timer with accurate (sub-millisecond) accuracy.
+    Clock's "t-zero" is set when instantiated.
     """
-    
-    
-    def __init__(self):
+        
+    def __init__(self, can_reset: bool = True):
+        self._can_reset = can_reset
         self._t_start = perf_counter()
 
-
+    @property
+    def can_reset(self) -> bool:
+        return self._can_reset
+        
     def reset(self) -> None:
-        self._t_start = perf_counter()
+        if self._can_reset:
+            self._t_start = perf_counter()
+        else:
+            raise TypeError("Clock instance cannot be reset.")
 
-
-    def tic(self) -> float:
+    def __call__(self):
         """
         Get the clock's current time.
         """           
         return perf_counter() - self._t_start
 
-    def __call__(self):
-        return perf_counter() - self._t_start
 
-
-master_clock = Clock()
+    
+master_clock = Clock(can_reset=False)
 
 
 

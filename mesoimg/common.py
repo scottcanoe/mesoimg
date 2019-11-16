@@ -4,6 +4,7 @@ import pathlib
 from pathlib import Path
 import select
 import sys
+from threading import Event
 import time
 from typing import (Any,
                     Callable,
@@ -22,10 +23,7 @@ import numpy as np
 __all__ = [
 
     # Constants/type hints.
-    'ArrayTransform',
-    'DType',
     'PathLike',
-    'URL',
     
     # OS/filesystem.
     'pi_info',
@@ -38,27 +36,22 @@ __all__ = [
     'read_h264',
         
     # URL/path handling.
-    'fspath',
     'pathlike',
     'urlparse',
 
     # User interaction.
     'stdin_ready',
     'read_stdin',
-    
+        
     # etc.
     'squeeze',
     'today',
-    'DictProxy',
     'repr_secs',
 ]
 
 
 # Define useful constants.
-ArrayTransform = Callable[[np.ndarray], np.ndarray]
-DType = Union[str, type, np.dtype]
 PathLike = Union[str, pathlib.Path]
-URL = Union[str, pathlib.Path, urllib.parse.ParseResult]
 
 
 """
@@ -99,7 +92,7 @@ def read_json(path: PathLike) -> dict:
         return json.load(f)
         
 
-def write_json(path: PathLike, data: dict, indent: int=2, **kw) -> None:
+def write_json(path: PathLike, data: dict, indent: int = 2, **kw) -> None:
     with open(path, 'w') as f:
         json.dump(data, f, indent=indent, **kw)
 
@@ -175,16 +168,12 @@ def read_h264(path: PathLike) -> np.ndarray:
 # URL and path handling.
 
 
-def fspath(url: URL) -> str:
-    return os.fspath(url)
-
-
 def pathlike(obj: Any) -> bool:
     """Determine whether an object is interpretable as a filesystem path."""
     return isinstance(obj, (str, Path))        
 
             
-def urlparse(url: URL,
+def urlparse(url: Union[PathLike, urllib.parse.ParseResult],
              scheme: str = '',
              ) -> urllib.parse.ParseResult:
     """
@@ -223,6 +212,8 @@ def read_stdin(timeout: float = 0.0) -> str:
     return ''
 
 
+
+
 # etc.
 
 
@@ -240,73 +231,7 @@ def today() -> str:
     """
     d = time.localtime()
     return f'{d.tm_year}-{d.tm_mon:02}-{d.tm_mday:02}'
-
-        
-        
-class Channels:
-    
-    
-    _string: str
-    _index: Union[int, slice]
-    
-    def __init__(self, obj: Union[str, Iterable[str], 'Channels']):
-        
-        if isinstance(obj, Channels):
-            self._string = obj._string
-            self._index = obj._index
-        else:
-            string = ''.join(c.lower() for c in obj)
-            if string in ('r', 'g', 'b'):
-                index = 'rgb'.find(string)
-            elif string == 'rgb':
-                index = slice(None)
-            else:
-                raise ValueError(f"Unsupported channels '{obj}'.")
-            self._string = string
-            self._index = index
-    
-        
-    @property
-    def string(self):
-        return self._string
-    
-    @property
-    def index(self):
-        return self._index
-            
-    def __repr__(self):
-        return self._string
-
-    def __str__(self):
-        return self._string
-    
-    
-
-
-
-class DictProxy:
-    """
-    Wrapper to make dictionaries immutable.
-    """
-    def __init__(self, data: Mapping):
-        self._data = data
-
-    #-------------------------------------------#
-    # Accessors
-    
-    def keys(self) -> KeysView:
-        return self._data.keys()
-
-    def values(self) -> ValuesView:
-        return self._data.values()
-
-    def items(self) -> ItemsView:
-        return self._data.items()
-
-    def __getitem__(self, key: Any):
-        return self._data[key]
-
-
+       
 
 def repr_secs(secs):
     """
@@ -319,49 +244,9 @@ def repr_secs(secs):
     if secs >= 1e-3:
         return sign * secs * 1e3, 'msec.'
     elif secs >= 1e-6:
-        return sign * secs * 1e6, 'usec.'    
+        return sign * secs * 1e6, 'usec.' 
     else:
         return sign * secs * 1e9, 'nsec'
         
-
-
-class Channels:
-    
-    
-    _string: str
-    _index: Union[int, slice]
-    
-    def __init__(self, obj: Union[str, Iterable[str], 'Channels']):
-        
-        if isinstance(obj, Channels):
-            self._string = obj._string
-            self._index = obj._index
-        else:
-            string = ''.join(c.lower() for c in obj)
-            if string in ('r', 'g', 'b'):
-                index = 'rgb'.find(string)
-            elif string == 'rgb':
-                index = slice(None)
-            else:
-                raise ValueError(f"Unsupported channels '{obj}'.")
-            self._string = string
-            self._index = index
-    
-        
-    @property
-    def string(self):
-        return self._string
-    
-    @property
-    def index(self):
-        return self._index
-            
-    def __repr__(self):
-        return self._string
-
-    def __str__(self):
-        return self._string
-    
-
 
 
