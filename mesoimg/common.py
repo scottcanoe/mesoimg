@@ -13,11 +13,13 @@ from typing import (Any,
                     Iterable,
                     KeysView,
                     Mapping,
+                    NamedTuple,
                     Optional,
                     Tuple,
                     Union,
                     ValuesView)
 import urllib.parse
+import h5py
 import numpy as np
 
 
@@ -27,9 +29,12 @@ __all__ = [
     'PathLike',
     'pathlike',
 
-    # OS/filesystem
+    # Networking    
     'Ports',
-    
+    'Frame',
+    'send_frame',
+    'recv_frame',
+
     # OS/filesystem
     'pi_info',
     'remove',
@@ -39,8 +44,11 @@ __all__ = [
     'write_text',
     'read_raw',
     'read_h264',
+    'read_h5',
+    'write_h5',
+    'write_mp4',
         
-    # URL/path handling    
+    # URL/path handling
     'urlparse',
 
     # User interaction
@@ -69,10 +77,56 @@ def pathlike(obj: Any) -> bool:
 
 
 class Ports(IntEnum):
+    """
+    Enum for holding port numbers.
+    """
     COMMAND = 7000
     FRAME   = 7001
     STATUS  = 7002
     PREVIEW = 7003
+
+
+class Frame(NamedTuple):
+    """
+    Named tuple that encapsulates an imaging frame along
+    frame number and a timestamp.
+    """
+    data: np.ndarray
+    index: int
+    timestamp: float
+
+
+def send_frame(socket,
+               frame: Frame,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
+    """
+    Send a `Frame` object over a zmq socket.
+    """
+    md = {'shape': frame.data.shape,
+          'dtype': str(frame.data.dtype),
+          'index': frame.index,
+          'timestamp' : frame.timestamp}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(frame.data, flags, copy=copy, track=track)
+
+
+def recv_frame(socket,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> Frame:
+    """
+    Receive a `Frame` object over a zmq socket.
+    """
+
+    md = socket.recv_json(flags=flags)
+    msg  = socket.recv(flags=flags, copy=copy, track=track)
+    buf = memoryview(msg)
+    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+    return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
 
 
 #-------------------------------------------------------------------#
@@ -129,7 +183,7 @@ def write_text(path: PathLike, text: str) -> None:
        
 
 def read_raw(path: PathLike,
-             resolution: Tuple[int, int] = (640, 480),
+             resolution: Tuple[int, int] = (480, 480),
              n_channels: int = 3,
              ) -> np.ndarray:
     """
@@ -166,7 +220,7 @@ def read_raw(path: PathLike,
     
 
 def iterframes_h264(path) -> np.ndarray:
-    
+    import cv2
     cap = cv2.VideoCapture(str(path))
     try:
         while cap.isOpened():
@@ -183,7 +237,25 @@ def iterframes_h264(path) -> np.ndarray:
 def read_h264(path: PathLike) -> np.ndarray:
     return np.array(list(iterframes_h264(path)))
 
-        
+
+def read_h5(path: PathLike) -> np.ndarray:
+    
+    with h5py.File(str(path), 'r') as f:
+        dset = f['data']
+        mov = dset[:]
+    return mov
+
+def write_h5(path: PathLike, arr: np.ndarray) -> None:
+    
+    with h5py.File(str(path), 'w') as f:
+        dset = f.create_dataset('data', data=arr)
+
+
+def write_mp4(path: PathLike, mov: np.ndarray, fps: float=30.0) -> None:
+    import imageio
+    imageio.mimwrite(str(path), mov, fps=fps)
+
+
 #-------------------------------------------------------------------#
 # OS/filesystem
 
@@ -208,7 +280,9 @@ def urlparse(url: Union[PathLike, urllib.parse.ParseResult],
                 
 
 
-# User interaction.
+#-------------------------------------------------------------------#
+# User interaction
+
 
 def stdin_ready(timeout: float = 0.0) -> bool:
     """

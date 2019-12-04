@@ -51,6 +51,7 @@ class Camera:
         'shutter_speed',
         'awb_mode',
         'awb_gains',
+        'video_denoise',
         'closed',
         # capture metadata
         'index',
@@ -59,15 +60,12 @@ class Camera:
     
     
     def __init__(self,
-                 resolution: Tuple[int, int] = (640, 480),
+                 resolution: Tuple[int, int] = (480, 480),
                  channels: str = 'g',
                  framerate: float = 15.0,
                  sensor_mode: int = 7,
                  awb_mode: str = 'off',
                  awb_gains: Tuple[float, float] = (1.0, 1.0),
-                 cmd_sock = None,
-                 frame_sock = None,
-                 status_sock = None,
                  ):
 
                         
@@ -97,10 +95,16 @@ class Camera:
                                       framerate=framerate,
                                       sensor_mode=sensor_mode)
                                       
-        time.sleep(1.0)
+        time.sleep(2.0)
+
+        # Disable white balance.
         self.awb_mode = awb_mode
         self.awb_gains = awb_gains
-        time.sleep(1.0)
+        
+        # Disable video denoising.
+        self.video_denoise = False
+
+
         self.stash_attrs()
                                 
     #-----------------------------------------------------------#
@@ -186,7 +190,6 @@ class Camera:
     def exposure_speed(self) -> int:
         return self._cam.exposure_speed
         
-
     @property
     def shutter_speed(self) -> int:
         return self._cam.shutter_speed
@@ -194,6 +197,14 @@ class Camera:
     @shutter_speed.setter
     def shutter_speed(self, speed: int) -> None:
         self._cam.shutter_speed = speed
+
+    @property
+    def video_denoise(self) -> bool:
+        return self._cam.video_denoise
+        
+    @video_denoise.setter
+    def video_denoise(self, val: bool) -> None:
+        self._cam.video_denoise = val
 
     @property
     def closed(self):

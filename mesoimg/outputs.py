@@ -12,7 +12,6 @@ import zmq
 
 
 __all__ = [
-    'Frame',
     'FrameBuffer',
     'FrameStream',
     'H5WriteStream',
@@ -21,9 +20,6 @@ __all__ = [
 
 
 
-Frame = namedtuple('Frame', ['data',
-                             'index',
-                             'timestamp'])
 
 
 
