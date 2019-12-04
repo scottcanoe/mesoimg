@@ -22,10 +22,10 @@ import numpy as np
 
 __all__ = [
 
-    # Constants/type hints.
+    # Constants/type hints
     'PathLike',
     
-    # OS/filesystem.
+    # OS/filesystem
     'pi_info',
     'remove',
     'read_json',
@@ -35,18 +35,24 @@ __all__ = [
     'read_raw',
     'read_h264',
         
-    # URL/path handling.
+    # URL/path handling
     'pathlike',
     'urlparse',
 
-    # User interaction.
+    # User interaction
     'stdin_ready',
     'read_stdin',
         
+    # Networking
+    'Ports',
+
+
     # etc.
     'squeeze',
     'today',
     'repr_secs',
+
+    
 ]
 
 
@@ -212,6 +218,15 @@ def read_stdin(timeout: float = 0.0) -> str:
     return ''
 
 
+# Networking
+
+from enum import IntEnum
+
+class Ports(IntEnum):
+    COMMAND = 7000
+    FRAME   = 7001
+    STATUS  = 7002
+    PREVIEW = 7003
 
 
 # etc.

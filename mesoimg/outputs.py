@@ -2,7 +2,7 @@ from collections import namedtuple
 import io
 from pathlib import Path
 from threading import Event, Lock
-from typing import Optional, Union, Sequence
+from typing import Callable, Optional, Union, Sequence
 import h5py
 import numpy as np
 from picamera.array import raw_resolution
@@ -36,12 +36,18 @@ class FrameBuffer(io.BytesIO):
     """
     
     
-    def __init__(self, cam: 'Camera'):        
+    def __init__(self,
+                 cam: 'Camera',
+                 callback: Optional[Callable] = None):
         super().__init__()
 
         # Basic attributes and their thread lock.
         self._cam = cam    
-                        
+        if callback is None:
+            self.callback = cam._write_callback
+        else:
+            self.callback = callback
+            
         # Initialize reshaping parameters.
         # In raw input mode, the sensor sends us data with resolution
         # rounded up to nearest multiples of 16 or 32. Find this input,
@@ -70,7 +76,7 @@ class FrameBuffer(io.BytesIO):
                 
         self._n_bytes_in = np.prod(self._in_shape)
         self._n_bytes_out = np.prod(self._out_shape)
-                           
+                                             
 
     def write(self, data: bytes) -> int:
         """
@@ -93,16 +99,17 @@ class FrameBuffer(io.BytesIO):
             print('not full frame', flush=True)
             return n_bytes
         if bytes_available > self._n_bytes_in:
-            raise IOError('too many bytes')
+            msg = f"Expected {self._n_bytes_in} bytes, received {bytes_available}"
+            raise IOError(msg)
                                 
         # Reshape the data from the buffer.
         data = np.frombuffer(self.getvalue(), dtype=np.uint8)
-        data = data.reshape(self._in_shape)[self._out_slice]
+        self.data = data.reshape(self._in_shape)[self._out_slice]
+        if self.callback:
+            self.callback(self.data)
 
-        # Notify camera of new frame.
-        self._cam._write_callback(data)
-                
         # Finally, rewind the buffer and return as usual.
+        self.truncate(0)
         self.seek(0)
         return n_bytes
         
@@ -214,4 +221,18 @@ class H5WriteStream(FrameStream):
         self._closed = True
 
 
+def send_frame(socket,
+               frame: Frame,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
 
+    md = {'shape': frame.data.shape,
+          'dtype': str(frame.data.dtype),
+          'index': frame.index,
+          'timestamp' : frame.timestamp}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(frame.data.tobytes(), flags, copy=copy, track=track)    
+    
+            

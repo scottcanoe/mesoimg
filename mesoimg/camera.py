@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 import re
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 import time
 from typing import (Any,
                     Callable,
@@ -19,9 +19,11 @@ from typing import (Any,
 
 import imageio
 import numpy as np
+import zmq
+
 import picamera
 from mesoimg.common import *
-from mesoimg.timing import Clock, IntervalTimer
+from mesoimg.timing import *
 from mesoimg.outputs import Frame, FrameBuffer, FrameStream, H5WriteStream
 
 
@@ -30,29 +32,10 @@ __all__ = [
     'Camera',
 ]
 
-
       
         
 class Camera:
-
-    """
-    Camera that s
-    Make a TCP server?
-
-    Parameters
-    ----------
-
-    resolution: (int, int)
-    framerate: float
-    sensor_mode: int
-    warm_up float >= 0
-        If > 0, will used time.sleep() to allow camera to warm up it's sensors..
-
-    """
-
-    COMMAND_PORT = 7000
-    DATA_PORT    = 7001
-    STATUS_PORT  = 7002
+    
     
     ATTRIBUTES = [
         # hardware
@@ -78,35 +61,35 @@ class Camera:
     def __init__(self,
                  resolution: Tuple[int, int] = (640, 480),
                  channels: str = 'g',
-                 framerate: float = 30.0,
+                 framerate: float = 15.0,
                  sensor_mode: int = 7,
-                 networking: bool = False,
+                 awb_mode: str = 'off',
+                 awb_gains: Tuple[float, float] = (1.0, 1.0),
+                 cmd_sock = None,
+                 frame_sock = None,
+                 status_sock = None,
                  ):
 
                         
         # Events, flags, locks.
-        self._lock = Lock()
+        self.lock = Lock()
         self._frame = None
         self._index = 0
         self._clock = Clock()
         self._timestamp = self._clock()
-
-        self._recording = False
-        self.write_complete = False
-        self.abort = False
-        self.stop_event_loop = False
-                                        
+        
+        self._active = False
+        self._countdown_timer = None
+        self._stop = False
+        self.stop_event = Event()
+        
         # Attributes.
         self.channels = channels
 
-        # Networking attributes.           
-        self._networking = networking        
-        self.zmq_context = None
-        self.cmd_sock    = None
-        self.data_sock   = None
-        self.stat_sock   = None
-        if self._networking:
-            self.open_sockets()
+        # Networking attributes.
+        self.cmd_sock = cmd_sock
+        self.frame_sock = frame_sock
+        self.status_sock = status_sock
                                                     
         # The picamera instance.
         print('Initializing camera.', flush=True)
@@ -114,8 +97,11 @@ class Camera:
                                       framerate=framerate,
                                       sensor_mode=sensor_mode)
                                       
-        time.sleep(2.0)        
-        self.stache_attrs()
+        time.sleep(1.0)
+        self.awb_mode = awb_mode
+        self.awb_gains = awb_gains
+        time.sleep(1.0)
+        self.stash_attrs()
                                 
     #-----------------------------------------------------------#
     # Main camera settings
@@ -200,9 +186,6 @@ class Camera:
     def exposure_speed(self) -> int:
         return self._cam.exposure_speed
         
-    @exposure_speed.setter
-    def exposure_speed(self, speed: int) -> None:
-        self._cam.exposure_speed = speed
 
     @property
     def shutter_speed(self) -> int:
@@ -225,8 +208,12 @@ class Camera:
         return self._frame
 
     @property
-    def recording(self) -> bool:
-        return self._recording        
+    def index(self) -> int:
+        return self._index
+
+    @property
+    def timestamp(self) -> float:
+        return self._timestamp
     
     @property
     def out_shape(self) -> Tuple:
@@ -241,12 +228,10 @@ class Camera:
             return (n_ypix, n_xpix, n_channels)
         return (n_ypix, n_xpix)
                 
-
     @property
-    def networking(self) -> bool:
-        return self._networking
-
-
+    def status(self):
+        return self.getstatus()
+        
     #-----------------------------------------------------------#
     # Get/Set methods.
 
@@ -267,89 +252,154 @@ class Camera:
     #-----------------------------------------------------------#
     # Recording/streaming methods.
 
-    def record(self,
-               outfile: PathLike,
-               duration: float,
-               overwrite: bool = False,
-               ) -> FrameBuffer:
+    def reset(self):
+        print('Resetting camera.', flush=True)
+        with self.lock:
+            self._active = False
+            self._frame = None
+            self._frame_counter = 0
+            self._index = 0
+            self._timestamp = 0
+            if self._clock is not master_clock:
+                self._clock.reset()
+            self._countdown_timer = None
+            self._stop = False
+        print('Done.', flush=True)
+    
+    
+    def start_preview(self):
+
+        self.reset()
+        self.frame_buffer = FrameBuffer(self)
+        with self.lock:
+            self._active = True
+            self._countdown_timer = None
+        print(f'Starting preview.', flush=True)
+        self._cam.start_recording(self.frame_buffer, 'rgb')
+        while not self._stop:
+            self._cam.wait_recording(1)
+        self._cam.stop_recording()
+        print(f'Previewed {self._index} frames')
+
+        
+    def stop_preview(self):
+        self._cam.stop_recording()
+        
+    
+    def start_recording(self,
+                        duration: float,
+                        interval: float = 2.0,
+                        ) -> None:
+
         
         """
         Record for a fixed period of time.
         """
         
-        if self._recording or self.write_complete or self.abort:
-            raise RuntimeError
-        
-        # Setup outfile and frame buffer.
-        outfile = self._init_outfile(outfile, duration, overwrite)
-        out = FrameBuffer(self, outfile=outfile)
-        
-        self.start_recording(out)
+        self.reset()
+        # Setup frame buffer.
+        self.frame_buffer = FrameBuffer(self)
+        with self.lock:
+            self._active = True
+            self._countdown_timer = CountdownTimer(duration)
+        print(f'Starting recording: {duration} secs.', flush=True)
+        self._cam.start_recording(self.frame_buffer, 'rgb')
         while True:
-            if self.write_complete or self.abort:
+            self._cam.wait_recording(interval)
+            if self._stop or self._countdown_timer() <= 0:
                 break
-            self.wait_recording(1.0)
-        self.stop_recording()
+            
+        self._cam.stop_recording()
+    
+    
+    def stop_recording(self) -> None:
+        print(f'Stopping recording.', flush=True)
+        #with self.lock:
+        self._stop = True
+        self._active = False
+        self._cam.stop_recording()
+        print('Done.', flush=True)
         
-        # Flush and close files/buffers.
-        with self._lock:
-            out.close()
-            outfile.close()
-            self.write_complete = False
-            self.abort = False
+    
+    def _write_callback(self, data: np.ndarray):
 
+        self._index = self._frame_counter
+        self._frame_counter += 1
+        self._timestamp = self._clock()
+        if self._index % 30 == 0:
+            print(f'Frame: {self._index}', flush=True)            
+            
+        self._frame = Frame(data=data,
+                            index=self._index,
+                            timestamp=self._timestamp)
+
+        if self.frame_sock:
+            frame = self._frame
+            md = {'shape': frame.data.shape,
+                  'dtype': str(frame.data.dtype),
+                  'index': frame.index,
+                  'timestamp' : frame.timestamp}
+            self.frame_sock.send_json(md, zmq.SNDMORE)
+            self.frame_sock.send(frame.data.tobytes(),
+                                 0, # flags
+                                 copy=True,
+                                 track=False)
+            time.sleep(0.005)
+#            msg = self.frame_sock.recv_string()
+#            if msg == 'ready':
+#                send_frame(self.frame_sock, self._frame)
+#            else:
+#                self._stop = True
+                    
+        #if self._countdown_timer and self._countdown_timer() <= 0:
+         #   self._stop = True
         
                 
-    def start_recording(self) -> FrameBuffer:
+                
+    def _write_callback2(self, data: np.ndarray) -> None:
 
-        frame_buffer = FrameBuffer(self)
+        if self._stop:
+            self.stop_recording()
+            return
 
-        with self._lock:
-            self._recording = True
-            self._frame_counter = 0
-            self._index = 0
-            self._clock.reset()
-            self._timestamp = 0
-            
-        print('Starting recording', flush=True)
-        self._cam.start_recording(frame_buffer, 'rgb')
-        return out
-        
-       
-    def wait_recording(self, timeout: float = 0) -> None:
-        """
-        Poll for events/handle user intervention while
-        waiting for recording to finish.
-        """
-
-        t_stop = master_clock() + timeout
-        self._cam.wait_recording(timeout)
-        
-        
-    def stop_recording(self) -> None:
-
-        self._cam.stop_recording()
-        with self._lock:
-            self._recording = False
-        print('Recording stopped.', flush=True)
-        
-
-    def _write_callback(self, data: np.ndarray) -> None:
-
-        with self._lock:
-            self._frame = Frame(data=data,
-                                index=self._frame_counter,
-                                timestamp=self._timestamp)
+        with self.lock:
+            self._index = self._frame_counter
             self._frame_counter += 1
-            self._index = self._frame.index
-            self._timestamp = self._frame.timestamp
-        
+            self._timestamp = self._clock()
 
-        
-        if read_stdin().strip() == 'q':
-            print('user abort', flush=True)
-            with self.lock:
-                self.abort = True
+            print(f'Frame: {self._index}', flush=True)            
+#            if index % 30 == 0:
+#                print(f'Frame: {index}', flush=True)
+
+                
+            self._frame = Frame(data=data,
+                                index=self._index,
+                                timestamp=self._timestamp)
+
+            # Send frame.
+            if self.frame_sock:
+                msg = self.frame_sock.recv_string()
+                if msg == 'ready':
+                    send_frame(self.frame_sock, self._frame)
+                elif msg == 'stop':
+                    self._stop = True
+
+            # Send status.
+            if self.status_sock:
+                msg = self.status_sock.recv_string()
+                if msg == 'ready':
+                    stat = self.getstatus()
+                    self.status_sock.send_json(stat)
+                elif msg == 'stop':
+                    self._stop = True
+                    
+            if self._countdown_timer and self._countdown_timer.clock() <= 0:
+                self._stop = True
+        # Stop recording if requested.
+
+        if self._stop:
+            self.stop_recording()
+            return                
 
     #-----------------------------------------------------------#
     # Housekeeping
@@ -362,17 +412,11 @@ class Camera:
 
 
     def restore_attrs(self) -> None:
-        self.setattrs(self.stache)
+        self.setattrs(self.stash)
     
-    
-    def cleanup(self) -> None:
-        with self._lock:
-            self._recording = False
-            
-                        
+                                       
     def close(self) -> None:
-        
-        self.cleanup()
+
         if not self.closed:
             self.stash_attrs()
             self._cam.close()
@@ -381,15 +425,12 @@ class Camera:
             
     def reopen(self) -> None:
         if not self.closed:
-            return
+            self.close()
 
-        resolution  = self.stache['resolution']
-        channels    = self.stache['channels']
-        framerate   = self.stache['framerate']
-        sensor_mode = self.stache['sensor_mode']
-        print('Reopening camera')
+        resolution  = self.stash['resolution']
+        framerate   = self.stash['framerate']
+        sensor_mode = self.stash['sensor_mode']
         self._cam = picamera.PiCamera(resolution=resolution,
-                                      channels=channels,
                                       framerate=framerate,
                                       sensor_mode=sensor_mode)
         time.sleep(2)
@@ -397,31 +438,6 @@ class Camera:
     #-----------------------------------------------------------#
     # Networking
 
-    def open_sockets(self):
-
-        self.zmq_context = zmq.Context()
-
-        # Open the command port for receiving client commands.       
-        self.cmd_sock = self.context.socket(zmq.REP)
-        self.cmd_sock.bind(f'tcp://*:{self.COMMAND_PORT}')
-
-        # Open the data port for streaming data to subscribers.
-        self.data_sock = self.context.socket(zmq.PUB)
-        self.data_sock.bind(f'tcp://*:{self.DATA_PORT}')
-    
-        self.stat_sock = self.context.socket(zmq.PUB)
-        self.stat_sock.bind(f'tcp://*:{self.STATUS_PORT}')
-    
-        
-    def close_sockets(self):
-
-        # Close/terminate all sockets and zmq context.
-        self.cmd_sock.close()
-        self.data_sock.close()
-        self.stat_sock.close()
-        self.zmq_context.term()
-
-                
                                                 
     #-----------------------------------------------------------#
     # Private/protected methods.
@@ -444,7 +460,7 @@ class Camera:
         if ext not in ('.h5', '.hdf5'):
             raise NotImplementedError(f'invalid file path: {str(path)}')
                 
-        n_frames = int(np.ceil(self.framerate * duration))        
+        n_frames = int(np.ceil(self.framerate * duration))   
         shape = (n_frames, *self.out_shape)
         outfile = H5WriteStream(path, shape, dtype=np.uint8)
         return outfile
@@ -483,6 +499,18 @@ class Camera:
         return s
 
 
+def send_frame(socket,
+               frame: Frame,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
 
+    md = {'shape': frame.data.shape,
+          'dtype': str(frame.data.dtype),
+          'index': frame.index,
+          'timestamp' : frame.timestamp}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(frame.data.tobytes(), flags, copy=copy, track=track)  
     
-        
+            

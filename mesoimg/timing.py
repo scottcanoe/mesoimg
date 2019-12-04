@@ -10,6 +10,7 @@ from .common import repr_secs
 __all__ = [
     'Clock',
     'master_clock',
+    'CountdownTimer',
     'IntervalTimer',
 ]
 
@@ -44,8 +45,30 @@ class Clock:
         return perf_counter() - self._t_start
 
 
-    
 master_clock = Clock(can_reset=False)
+
+
+class CountdownTimer:
+
+    def __init__(self, duration: float):
+        self._duration = duration
+        self._t_start = perf_counter()
+
+    @property
+    def duration(self) -> float:
+        return self._duration
+        
+    def reset(self) -> None:
+        self._t_start = perf_counter()
+        
+    def __call__(self):
+        """
+        Get the clock's remaining time.
+        """           
+        return self._duration - (perf_counter() - self._t_start)
+
+
+
 
 
 
