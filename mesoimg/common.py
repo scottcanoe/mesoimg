@@ -8,19 +8,14 @@ import sys
 from threading import Event
 import time
 from typing import (Any,
-                    Callable,
-                    ItemsView,
-                    Iterable,
-                    KeysView,
-                    Mapping,
                     NamedTuple,
-                    Optional,
                     Tuple,
                     Union,
-                    ValuesView)
+                    )
 import urllib.parse
 import h5py
 import numpy as np
+import zmq
 
 
 __all__ = [
