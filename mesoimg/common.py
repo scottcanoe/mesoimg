@@ -1,4 +1,5 @@
 from collections import namedtuple
+from enum import IntEnum
 import os
 import pathlib
 from pathlib import Path
@@ -22,8 +23,12 @@ import numpy as np
 
 __all__ = [
 
-    # Constants/type hints
+    # Constants/typing
     'PathLike',
+    'pathlike',
+
+    # OS/filesystem
+    'Ports',
     
     # OS/filesystem
     'pi_info',
@@ -35,34 +40,44 @@ __all__ = [
     'read_raw',
     'read_h264',
         
-    # URL/path handling
-    'pathlike',
+    # URL/path handling    
     'urlparse',
 
     # User interaction
     'stdin_ready',
     'read_stdin',
         
-    # Networking
-    'Ports',
-
-
     # etc.
     'squeeze',
     'today',
     'repr_secs',
-
-    
 ]
 
 
-# Define useful constants.
+#-------------------------------------------------------------------#
+# Constants/typing
+
 PathLike = Union[str, pathlib.Path]
 
+def pathlike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    return isinstance(obj, (str, Path))        
 
-"""
-OS/filesystem utilities.
-"""
+
+#-------------------------------------------------------------------#
+# Networking
+
+
+class Ports(IntEnum):
+    COMMAND = 7000
+    FRAME   = 7001
+    STATUS  = 7002
+    PREVIEW = 7003
+
+
+#-------------------------------------------------------------------#
+# OS/filesystem
+
 
 # Collect info about raspbian.
 if os.path.exists('/etc/os-release'):
@@ -169,14 +184,8 @@ def read_h264(path: PathLike) -> np.ndarray:
     return np.array(list(iterframes_h264(path)))
 
         
-
-
-# URL and path handling.
-
-
-def pathlike(obj: Any) -> bool:
-    """Determine whether an object is interpretable as a filesystem path."""
-    return isinstance(obj, (str, Path))        
+#-------------------------------------------------------------------#
+# OS/filesystem
 
             
 def urlparse(url: Union[PathLike, urllib.parse.ParseResult],
@@ -218,18 +227,8 @@ def read_stdin(timeout: float = 0.0) -> str:
     return ''
 
 
-# Networking
-
-from enum import IntEnum
-
-class Ports(IntEnum):
-    COMMAND = 7000
-    FRAME   = 7001
-    STATUS  = 7002
-    PREVIEW = 7003
-
-
-# etc.
+#-------------------------------------------------------------------#
+# etc
 
 
 def squeeze(arr: np.ndarray) -> np.ndarray:
