@@ -32,13 +32,26 @@ __all__ = [
     'Camera',
 ]
 
-      
-        
+
+
+
+
 class Camera:
     
-    
-    ATTRIBUTES = [
-        # hardware
+
+
+    _DEFAULT_CONFIG = {
+        'resolution' : (480, 480),
+        'channels' : 'g',
+        'framerate' :  20.0,
+        'sensor_mode' : 7,
+        'awb_mode' : 'off',
+        'awb_gains' : (1.0, 1.0)
+        'video_denoise' : False,
+    }      
+            
+
+    _STATUS_ATTRS = (
         'resolution',
         'channels',
         'framerate',
@@ -53,22 +66,22 @@ class Camera:
         'awb_gains',
         'video_denoise',
         'closed',
-        # capture metadata
-        'index',
-        'timestamp',
-    ]
-    
-    
-    def __init__(self,
-                 resolution: Tuple[int, int] = (480, 480),
-                 channels: str = 'g',
-                 framerate: float = 15.0,
-                 sensor_mode: int = 7,
-                 awb_mode: str = 'off',
-                 awb_gains: Tuple[float, float] = (1.0, 1.0),
-                 ):
+    )
 
-                        
+
+    #: Wrapped PiCamera instance. Gets set in ``Camera._init_cam``
+    _cam: Optional['PiCamera']
+
+    #: Settings used to initialize the camera the most recent time.
+    #: Gets set in ``Camera._init_cam``    
+    _init_config: Dict[str, Any]
+    
+    def __init__(self, **config):
+
+        
+        self._init_cam(**config)
+
+        
         # Events, flags, locks.
         self.lock = Lock()
         self._frame = None
@@ -80,33 +93,9 @@ class Camera:
         self._countdown_timer = None
         self._stop = False
         self.stop_event = Event()
-        
-        # Attributes.
-        self.channels = channels
-
-        # Networking attributes.
-        self.cmd_sock = cmd_sock
-        self.frame_sock = frame_sock
-        self.status_sock = status_sock
-                                                    
-        # The picamera instance.
-        print('Initializing camera.', flush=True)
-        self._cam = picamera.PiCamera(resolution=resolution,
-                                      framerate=framerate,
-                                      sensor_mode=sensor_mode)
-                                      
-        time.sleep(2.0)
-
-        # Disable white balance.
-        self.awb_mode = awb_mode
-        self.awb_gains = awb_gains
-        
-        # Disable video denoising.
-        self.video_denoise = False
 
 
-        self.stash_attrs()
-                                
+
     #-----------------------------------------------------------#
     # Main camera settings
 
@@ -208,7 +197,7 @@ class Camera:
 
     @property
     def closed(self):
-        return True if self._cam is None else self._cam.closed
+        return self._cam.closed if self._cam else True
 
         
     #-----------------------------------------------------------#
@@ -241,27 +230,11 @@ class Camera:
                 
     @property
     def status(self):
-        return self.getstatus()
+        return {name : getattr(self, name) for name in self._STATUS_ATTRS}
         
-    #-----------------------------------------------------------#
-    # Get/Set methods.
-
-
-    def getattrs(self, attrs: Sequence[str]) -> Dict:
-        """Bulk attribute getting"""
-        return {name : getattr(self, name) for name in attrs}
-
-    def getstatus(self) -> Dict:
-        return {name : getattr(self, name) for name in self.ATTRIBUTES}
-    
-    def setattrs(self, data: Dict[str, Any]) -> None:
-        """Bulk attribute setting"""
-        for key, val in data.items():
-            setattr(self, key, val)
-
 
     #-----------------------------------------------------------#
-    # Recording/streaming methods.
+    # Public methods
 
     def reset(self):
         print('Resetting camera.', flush=True)
@@ -331,7 +304,37 @@ class Camera:
         self._cam.stop_recording()
         print('Done.', flush=True)
         
+
+    #-------------------------------------------------------------------------#
+    # Private/protected methods
+
+
+    def _init_cam(self, **config: Dict[str, Any]) -> None:
+        """
+        Sets self._cam and self._init_config.
+        """
+        if self._cam is not None:
+            print('PiCamera instance already exists. Doing nothing', flush=True)
+            return
+        
+        # Fill in any missing configurations with defaults.
+        self._init_config = config.copy()
+        for key, val in self._DEFAULT_CONFIG.items():
+            if key not in self._init_config:
+                self._init_config[key] = val
+        
+        # Create the picamera instance, and set desired configuration.
+        print('Initializing camera.', flush=True)
+        self._cam = picamera.PiCamera(resolution=self._init_config['resolution'],
+                                      framerate=self._init_config['framerate'],
+                                      sensor_mode=self._init_config['sensor_mode'])
+        time.sleep(2.0)
+        for key, val in self._init_config.items():
+            if key in ('resolution', 'framerate', 'sensor_mode'):
+                continue
+            setattr(self, key, val)    
     
+
     def _write_callback(self, data: np.ndarray):
 
         self._index = self._frame_counter
@@ -418,18 +421,18 @@ class Camera:
 
     def stash_attrs(self) -> Dict:
         """Stash current attributes into self.attrs"""
-        self.stash = {key : getattr(self, key) for key in self.ATTRIBUTES}
+        self.stash = {key : getattr(self, key) for key in self.STASHING_ATTRS}
         return self.stash
 
 
     def restore_attrs(self) -> None:
-        self.setattrs(self.stash)
+        for key, val in self.stash.items():
+            setattr(self, key, val)
     
-                                       
+
     def close(self) -> None:
 
         if not self.closed:
-            self.stash_attrs()
             self._cam.close()
             self._cam = None
 
@@ -453,6 +456,9 @@ class Camera:
     #-----------------------------------------------------------#
     # Private/protected methods.
     
+
+
+
 
     def _init_outfile(self,
                       path: PathLike,
