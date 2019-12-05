@@ -116,10 +116,6 @@ class FrameBuffer(io.BytesIO):
 
 class FramePublisher(Thread):
 
-    #complete: Event
-    #_closed: bool
-    #_path: Path
-
 
     def __init__(self,
                  ctx,
@@ -127,6 +123,7 @@ class FramePublisher(Thread):
                  topic: str = 'frame',
                  hwm: int = 10,
                  timeout: float = 1.0,
+                 enabled: bool = True,
                  start: bool = True,
                  ):
 
@@ -139,9 +136,20 @@ class FramePublisher(Thread):
 
         self.cam = cam
         self.timeout = timeout
+
+        self.enabled = enabled
         self._terminate = False
         if start:
             self.start()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, tf: bool) -> None:
+        assert isinstance(tf, bool)
+        self._enabled = True
 
 
     def run(self):
@@ -156,6 +164,9 @@ class FramePublisher(Thread):
         cond = self.cam.new_frame
         with cond:
             while not self._terminate:
+                if not self._enabled:
+                    time.sleep(1)
+                    continue
                 ready = cond.wait(timeout)
                 if not ready:
                     continue

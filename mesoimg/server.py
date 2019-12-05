@@ -2,7 +2,7 @@ from queue import Queue
 from threading import Event, Lock, Thread
 import time
 from time import perf_counter as clock
-from typing import Dict
+from typing import Any, Dict, List, Union
 import numpy as np
 import zmq
 from mesoimg.common import *
@@ -14,13 +14,15 @@ from mesoimg.outputs import *
 class MesoServer:
 
 
-    def __init__(self):
+    verbose = False
+
+    def __init__(self, start: bool = True):
 
         self.sockets = {}
         self.threads = {}
 
         self.ctx = zmq.Context()
-        self.cmd_sock = self.ctx.socket(zmq.PAIR)
+        self.cmd_sock = self.ctx.socket(zmq.REP)
         self.cmd_sock.bind(f'tcp://*:{Ports.COMMAND}')
         self.cmd_poller = zmq.Poller()
         self.cmd_poller.register(self.cmd_sock, zmq.POLLIN | zmq.POLLOUT)
@@ -30,8 +32,12 @@ class MesoServer:
         # Open camera, and prepare to publish frames.
         self.cam = Camera()
         self.frame_publisher = FramePublisher(self.ctx, self.cam)
+        self.threads['frame_publisher'] = self.frame_publisher
+
         self._terminate = False
-        self.run()
+
+        if start:
+            self.run()
 
 
 
@@ -58,21 +64,29 @@ class MesoServer:
 
         """
 
-        print('Starting server.', flush=True)
+        print('Server ready.', flush=True)
 
         # Alias
         sock = self.cmd_sock
-        poller = self.cmd_sock.poller
+        poller = self.cmd_poller
         timeout = self.cmd_timeout
 
         self._terminate = False
-        while not self.terminate:
+        while not self._terminate:
 
-            # Poll for request from client.
-            ready = dict(poller.poll(timeout))
+            # Check for stdin.
+            line = read_stdin().strip()
+            if line:
+                self._handle_stdin(line)
+                continue
+
+            # Check for client requests.
+            ready = dict(poller.poll(timeout * 1000))
             if not (sock in ready and ready[sock] == zmq.POLLIN):
                 continue
             req = sock.recv_json()
+            if self.verbose:
+                print(f'Received request: {req}', flush=True)
 
             # Check action.
             if 'action' not in req:
@@ -121,11 +135,11 @@ class MesoServer:
 
         # Finally, close down.
         self._cleanup()
+        print('Server closed.')
 
 
 
     def close(self) -> str:
-        print('Closing server.')
         self._terminate = True
 
 
@@ -192,6 +206,15 @@ class MesoServer:
 
 
     #--------------------------------------------------------------------------#
+    # stdin handlers
+
+
+    def _handle_stdin(self, line: str) -> None:
+        line = 'self.' + line
+        exec(line)
+
+
+    #--------------------------------------------------------------------------#
     # client messaging
 
     """
@@ -199,25 +222,26 @@ class MesoServer:
 
     """
 
-    def _return_val(self, val: Any = '', info: str = '') -> None:
+    def _reply(self, rep: Dict) -> None:
+        if self.verbose:
+            print(f'Sending reply: {rep}')
+        self.cmd_sock.send_json(rep)
+        time.sleep(0.05)
+
+
+    def _return_val(self, val: Any = '') -> None:
 
         val = '' if val is None else val
-        rep = {'type' : 'val',
-               'val' : val,
-               'info' : info}
-        self.cmd_sock.send_json(rep)
-        time.sleep(0.05)
+        rep = {'type' : 'return', 'val' : val}
+        self._reply(rep)
 
 
-    def _return_error(self, exc: Exception, info: Any = '') -> None:
+    def _return_error(self, exc: Exception) -> None:
 
         msg = str(repr(exc))
-        print(msg, flush=True)
-        rep = {'type' : 'error',
-               'error' : msg,
-               'info' : info}
-        self.cmd_sock.send_json(rep)
-        time.sleep(0.05)
+        print('ERROR: ' + msg, flush=True)
+        rep = {'type' : 'error', 'val' : msg}
+        self._reply(rep)
 
 
     #--------------------------------------------------------------------------#
@@ -227,15 +251,14 @@ class MesoServer:
         """
         Prepare to close/exit the server.
         """
+        print('Closing sockets.')
         for sock in self.sockets.values():
             sock.close()
+        print('Closing threads.')
         for thread in self.threads.values():
             thread.close()
         self.cam.close()
-
-
-
-
-
+        time.sleep(1.5)
+        self.ctx.term()
 
 
