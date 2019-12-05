@@ -77,11 +77,8 @@ class Ports(IntEnum):
     """
     Enum for holding port numbers.
     """
-    COMMAND = 7000
-    FRAME   = 7001
-    STATUS  = 7002
-    PREVIEW = 7003
-    FRAME_PUB = 7012
+    COMMAND   = 7000
+    FRAME_PUB = 7001
 
 
 class Frame(NamedTuple):
@@ -125,6 +122,7 @@ def recv_frame(socket,
     buf = memoryview(msg)
     data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
     return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
+
 
 def pub_frame(socket,
               frame: Frame,

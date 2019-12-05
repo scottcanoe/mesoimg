@@ -165,7 +165,7 @@ class FramePublisher(Thread):
         time.sleep(0.01)
 
 
-    def stop(self):
+    def close(self):
         self._terminate = True
         time.sleep(self.timeout + 0.5)
 
