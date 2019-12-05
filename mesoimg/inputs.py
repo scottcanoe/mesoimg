@@ -7,7 +7,6 @@ from mesoimg.common import *
 
 
 HOST = 'pi-meso.local'
-PORT = 7012
 
 
 
@@ -48,11 +47,10 @@ class FrameSubscriber(Thread):
 
         self._terminate = False
         while not self._terminate:
-
             ready = dict(poller.poll(timeout))
             if sock in ready and ready[sock] == zmq.POLLIN:
                 frame = sub_frame(sock)
-                print(f'Got frame: {frame.index}')
+                print(f'Got frame: {frame.index}', flush=True)
 
         sock.close()
         poller.unregister(sock)
@@ -61,8 +59,5 @@ class FrameSubscriber(Thread):
 
     def close(self):
         self._terminate = True
-        time.sleep(self.timeout + 0.5)
 
 
-ctx = zmq.Context()
-sub = FrameSubscriber(ctx)
