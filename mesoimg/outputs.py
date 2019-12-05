@@ -139,7 +139,7 @@ class FramePublisher(Thread):
         self.topic = topic
 
         # self.poller = zmq.Poller()
-        # self.poller.register(self.poller, zmq.POLLOUT)
+        # self.poller.register(self.sock, zmq.POLLOUT)
 
         self.cam = cam
         self.timeout = timeout
