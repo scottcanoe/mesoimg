@@ -9,22 +9,19 @@ from typing import (Any,
                     Callable,
                     ClassVar,
                     Dict,
-                    Iterable,
                     List,
-                    Mapping,
                     Optional,
                     Sequence,
                     Tuple,
                     Union)
-
-import imageio
+from queue import Queue
 import numpy as np
 import zmq
 
 import picamera
 from mesoimg.common import *
 from mesoimg.timing import *
-from mesoimg.outputs import Frame, FrameBuffer, FrameStream, H5WriteStream
+from mesoimg.outputs import *
 
 
 
@@ -34,24 +31,12 @@ __all__ = [
 
 
 
-
-
 class Camera:
-    
 
 
-    _DEFAULT_CONFIG = {
-        'resolution' : (480, 480),
-        'channels' : 'g',
-        'framerate' :  20.0,
-        'sensor_mode' : 7,
-        'awb_mode' : 'off',
-        'awb_gains' : (1.0, 1.0)
-        'video_denoise' : False,
-    }      
-            
 
-    _STATUS_ATTRS = (
+    _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
+        'state',
         'resolution',
         'channels',
         'framerate',
@@ -65,34 +50,60 @@ class Camera:
         'awb_mode',
         'awb_gains',
         'video_denoise',
-        'closed',
-    )
+        )
 
 
-    #: Wrapped PiCamera instance. Gets set in ``Camera._init_cam``
-    _cam: Optional['PiCamera']
+    _DEFAULT_CONFIG: ClassVar[Dict[str, Any]] = {\
+        'resolution' : (480, 480),
+        'channels' : 'g',
+        'framerate' :  20.0,
+        'sensor_mode' : 7,
+        'exposure_mode' : 'sports',
+        'iso' : 0,
+        'awb_mode' : 'off',
+        'awb_gains' : (1.0, 1.0),
+        'video_denoise' : False,
+        }
 
-    #: Settings used to initialize the camera the most recent time.
-    #: Gets set in ``Camera._init_cam``    
-    _init_config: Dict[str, Any]
-    
+
+    #: Configurations. Always includes 'default' and 'init'.
+    _configs: Dict[str, Dict]
+
+    #: Wrapped PiCamera instance. Gets set in ``Camera.init_cam``
+    _cam: Optional['PiCamera'] = None
+
+    #: Current state of camera. One of 'waiting', 'recording', 'previewing'.
+    _state: str = 'waiting'
+
+    #: Index of current frame being captured.
+    _frame_counter: int = 0
+
+    #: Most recent frame captured.
+    _frame: Optional[Frame] = None
+
+    #: Clock used for timestamps.
+    _clock: Optional[Clock] = None
+
+
     def __init__(self, **config):
 
-        
-        self._init_cam(**config)
+        self._configs = {}
+        self._configs['default'] = self._DEFAULT_CONFIG.copy()
+        self.init_cam(config)
 
-        
-        # Events, flags, locks.
+        self.frame_queue = Queue(maxsize=10)
+
         self.lock = Lock()
-        self._frame = None
-        self._index = 0
+        self.frame = None
+        self.new_frame = Condition()
+
+        self._frame_buffer = FrameBuffer(self)
+        self._frame_counter = 0
         self._clock = Clock()
-        self._timestamp = self._clock()
-        
-        self._active = False
         self._countdown_timer = None
-        self._stop = False
-        self.stop_event = Event()
+        self._state = 'waiting'
+
+
 
 
 
@@ -111,7 +122,7 @@ class Camera:
     @property
     def channels(self) -> str:
         return self._channels
-            
+
     @channels.setter
     def channels(self, ch: str) -> None:
         if ch not in ('r', 'g', 'b', 'rgb'):
@@ -129,32 +140,32 @@ class Camera:
     @property
     def sensor_mode(self) -> int:
         return self._cam.sensor_mode
-        
+
     @sensor_mode.setter
     def sensor_mode(self, mode: int) -> None:
         self._cam.sensor_mode = mode
-           
+
     @property
     def awb_mode(self) -> str:
         return self._cam.awb_mode
-        
+
     @awb_mode.setter
     def awb_mode(self, mode: str) -> None:
         self._cam.awb_mode = mode
-                
+
     @property
     def awb_gains(self) -> Tuple[float, float]:
         gains = self._cam.awb_gains
         return (float(gains[0]), float(gains[1]))
-        
+
     @awb_gains.setter
     def awb_gains(self, gains: Tuple[float, float]) -> None:
         self._cam.awb_gains = gains
-    
+
     @property
     def iso(self) -> int:
         return self._cam.iso
-        
+
     @iso.setter
     def iso(self, val: int) -> None:
         self._cam.iso = val
@@ -162,7 +173,7 @@ class Camera:
     @property
     def exposure_mode(self) -> str:
         return self._cam.exposure_mode
-        
+
     @exposure_mode.setter
     def exposure_mode(self, mode: str) -> None:
         self._cam.exposure_mode = mode
@@ -170,7 +181,7 @@ class Camera:
     @property
     def analog_gain(self) -> float:
         return float(self._cam.analog_gain)
-        
+
     @property
     def digital_gain(self) -> float:
         return float(self._cam.digital_gain)
@@ -178,11 +189,11 @@ class Camera:
     @property
     def exposure_speed(self) -> int:
         return self._cam.exposure_speed
-        
+
     @property
     def shutter_speed(self) -> int:
         return self._cam.shutter_speed
-        
+
     @shutter_speed.setter
     def shutter_speed(self, speed: int) -> None:
         self._cam.shutter_speed = speed
@@ -190,67 +201,173 @@ class Camera:
     @property
     def video_denoise(self) -> bool:
         return self._cam.video_denoise
-        
+
     @video_denoise.setter
     def video_denoise(self, val: bool) -> None:
         self._cam.video_denoise = val
 
     @property
     def closed(self):
-        return self._cam.closed if self._cam else True
+        return self._cam.closed
 
-        
-    #-----------------------------------------------------------#
-    # My settings, and some convenience properties.
-    
-    @property
-    def frame(self) -> Frame:
-        return self._frame
+
+    #--------------------------------------------------------------------------#
+    # etc. properties
+
 
     @property
-    def index(self) -> int:
-        return self._index
+    def state(self):
+        return self._state
 
-    @property
-    def timestamp(self) -> float:
-        return self._timestamp
-    
+
     @property
     def out_shape(self) -> Tuple:
         """
         Get the frame shape in array dimension order.
         The `channels` dimension will be omitted in single-channel mode.
-       
-        """        
+
+        """
         n_xpix, n_ypix = self.resolution
         n_channels = len(self.channels)
         if n_channels > 1:
             return (n_ypix, n_xpix, n_channels)
         return (n_ypix, n_xpix)
-                
+
+
+
+    #--------------------------------------------------------------------------#
+    # Configuration  getting/setting and status reporting
+
     @property
-    def status(self):
+    def config(self) -> Dict[str, Any]:
+        attrs = sorted(list(self._DEFAULT_CONFIG.keys()))
+        return {name : getattr(self, name) for name in attrs}
+
+
+    @config.setter
+    def config(self, c: Union[str, Dict]) -> None:
+        if isinstance(c, str):
+            c = self._configs[c]
+        for key, val in c.items():
+            setattr(self, key, val)
+
+
+    def stash_config(self, name: str = 'stash') -> None:
+        """Stash current attributes into self.attrs"""
+        self._configs[name] = self.config
+
+
+    @property
+    def status(self) -> Dict[str, Any]:
         return {name : getattr(self, name) for name in self._STATUS_ATTRS}
-        
 
-    #-----------------------------------------------------------#
-    # Public methods
 
-    def reset(self):
-        print('Resetting camera.', flush=True)
+    #--------------------------------------------------------------------------#
+    # Opening/closing/reopening/resetting methods
+
+
+    def init_cam(self, config: Dict[str, Any]) -> None:
+        """
+        Sets self._cam and self._init_config.
+        """
+        if self._cam is not None:
+            print('PiCamera instance already exists. Doing nothing', flush=True)
+            return
+
+        # Fill in any missing configurations with defaults.
+        config = config.copy()
+        for key, val in self._DEFAULT_CONFIG.items():
+            if key not in config:
+                config[key] = val
+
+        # Create the picamera instance, and set desired configuration.
+        print('Initializing camera.', flush=True)
+        self._cam = picamera.PiCamera(resolution=config['resolution'],
+                                      framerate=config['framerate'],
+                                      sensor_mode=config['sensor_mode'])
+        time.sleep(2.0)
+        for key, val in config.items():
+            if key in ('resolution', 'framerate', 'sensor_mode'):
+                continue
+            setattr(self, key, val)
+
+        self._configs['init'] = config
+
+
+    def close(self) -> None:
+        try:
+            if not self.closed:
+                print('Closing camera.', flush=True)
+                self.stash_config('last')
+                self._cam.close()
+                time.sleep(0.1)
+        except:
+            try:
+                self._cam.close()
+            except:
+                pass
+
+
+    def reopen(self, config: Union[str, Dict] = 'init') -> None:
+
+        if not self.closed:
+            self.close()
+
+        if isinstance(config, str):
+            try:
+                config = self._configs[config]
+            except KeyError:
+                print(f'No such config: {config}. Falling back to default.')
+                config = self._DEFAULT_CONFIG
+        self.init_cam(config)
+
+
+    def _reset(self):
+
+        # while not self.frame_queue.empty():
+        #     self.frame_queue.get()
+
+        # Reset frame and its counters.
         with self.lock:
-            self._active = False
-            self._frame = None
+            self.frame = None
             self._frame_counter = 0
-            self._index = 0
-            self._timestamp = 0
             if self._clock is not master_clock:
                 self._clock.reset()
-            self._countdown_timer = None
-            self._stop = False
-        print('Done.', flush=True)
-    
-    
+
+        # Reinitialize frame buffer.
+        if self._frame_buffer:
+            self._frame_buffer.close()
+            self._frame_buffer = None
+            time.sleep(0.01)
+        self._frame_buffer = FrameBuffer(self)
+
+        # Clear remaining state variables.
+        self._countdown_timer = None
+        self._state = 'waiting'
+
+
+
+    def test(self, duration: float = 2.0, interval: float = 1.0) -> None:
+
+        self._reset()
+        self._countdown_timer = CountdownTimer(duration)
+
+        self._cam.start_recording(self._frame_buffer, 'rgb')
+        while True:
+            self._cam.wait_recording(interval)
+            if self._countdown_timer() <= 0:
+                break
+        self._cam.stop_recording()
+
+        n_frames = self._frame_counter - 1
+        fps = n_frames / duration
+        print(f'Produced {n_frames} frames in {duration} secs. (fps={fps})', flush=True)
+
+
+    #--------------------------------------------------------------------------#
+    # Recording/previewing
+
+
     def start_preview(self):
 
         self.reset()
@@ -265,21 +382,21 @@ class Camera:
         self._cam.stop_recording()
         print(f'Previewed {self._index} frames')
 
-        
+
     def stop_preview(self):
         self._cam.stop_recording()
-        
-    
+
+
     def start_recording(self,
                         duration: float,
                         interval: float = 2.0,
                         ) -> None:
 
-        
+
         """
         Record for a fixed period of time.
         """
-        
+
         self.reset()
         # Setup frame buffer.
         self.frame_buffer = FrameBuffer(self)
@@ -292,10 +409,10 @@ class Camera:
             self._cam.wait_recording(interval)
             if self._stop or self._countdown_timer() <= 0:
                 break
-            
+
         self._cam.stop_recording()
-    
-    
+
+
     def stop_recording(self) -> None:
         print(f'Stopping recording.', flush=True)
         #with self.lock:
@@ -303,186 +420,36 @@ class Camera:
         self._active = False
         self._cam.stop_recording()
         print('Done.', flush=True)
-        
+
+
 
     #-------------------------------------------------------------------------#
     # Private/protected methods
 
 
-    def _init_cam(self, **config: Dict[str, Any]) -> None:
+    def _write_callback(self, data: np.ndarray) -> None:
+
         """
-        Sets self._cam and self._init_config.
+        Called by the frame buffer upon new frame being written.
         """
-        if self._cam is not None:
-            print('PiCamera instance already exists. Doing nothing', flush=True)
-            return
-        
-        # Fill in any missing configurations with defaults.
-        self._init_config = config.copy()
-        for key, val in self._DEFAULT_CONFIG.items():
-            if key not in self._init_config:
-                self._init_config[key] = val
-        
-        # Create the picamera instance, and set desired configuration.
-        print('Initializing camera.', flush=True)
-        self._cam = picamera.PiCamera(resolution=self._init_config['resolution'],
-                                      framerate=self._init_config['framerate'],
-                                      sensor_mode=self._init_config['sensor_mode'])
-        time.sleep(2.0)
-        for key, val in self._init_config.items():
-            if key in ('resolution', 'framerate', 'sensor_mode'):
-                continue
-            setattr(self, key, val)    
-    
 
-    def _write_callback(self, data: np.ndarray):
-
-        self._index = self._frame_counter
-        self._frame_counter += 1
-        self._timestamp = self._clock()
-        if self._index % 30 == 0:
-            print(f'Frame: {self._index}', flush=True)            
-            
-        self._frame = Frame(data=data,
-                            index=self._index,
-                            timestamp=self._timestamp)
-
-        if self.frame_sock:
-            frame = self._frame
-            md = {'shape': frame.data.shape,
-                  'dtype': str(frame.data.dtype),
-                  'index': frame.index,
-                  'timestamp' : frame.timestamp}
-            self.frame_sock.send_json(md, zmq.SNDMORE)
-            self.frame_sock.send(frame.data.tobytes(),
-                                 0, # flags
-                                 copy=True,
-                                 track=False)
-            time.sleep(0.005)
-#            msg = self.frame_sock.recv_string()
-#            if msg == 'ready':
-#                send_frame(self.frame_sock, self._frame)
-#            else:
-#                self._stop = True
-                    
-        #if self._countdown_timer and self._countdown_timer() <= 0:
-         #   self._stop = True
-        
-                
-                
-    def _write_callback2(self, data: np.ndarray) -> None:
-
-        if self._stop:
-            self.stop_recording()
-            return
-
+        # Update frame and its counters.
         with self.lock:
-            self._index = self._frame_counter
+            index, timestamp = self._frame_counter, self._clock()
+            self.frame = Frame(data=data,
+                               index=index,
+                               timestamp=timestamp)
             self._frame_counter += 1
-            self._timestamp = self._clock()
 
-            print(f'Frame: {self._index}', flush=True)            
-#            if index % 30 == 0:
-#                print(f'Frame: {index}', flush=True)
+        # Notify frame emitters.
+        with self.new_frame:
+            self.new_frame.notify_all()
 
-                
-            self._frame = Frame(data=data,
-                                index=self._index,
-                                timestamp=self._timestamp)
-
-            # Send frame.
-            if self.frame_sock:
-                msg = self.frame_sock.recv_string()
-                if msg == 'ready':
-                    send_frame(self.frame_sock, self._frame)
-                elif msg == 'stop':
-                    self._stop = True
-
-            # Send status.
-            if self.status_sock:
-                msg = self.status_sock.recv_string()
-                if msg == 'ready':
-                    stat = self.getstatus()
-                    self.status_sock.send_json(stat)
-                elif msg == 'stop':
-                    self._stop = True
-                    
-            if self._countdown_timer and self._countdown_timer.clock() <= 0:
-                self._stop = True
-        # Stop recording if requested.
-
-        if self._stop:
-            self.stop_recording()
-            return                
-
-    #-----------------------------------------------------------#
-    # Housekeeping
+        # Report.
+        if index % 30 == 0:
+            print(f'Frame: {index}', flush=True)
 
 
-    def stash_attrs(self) -> Dict:
-        """Stash current attributes into self.attrs"""
-        self.stash = {key : getattr(self, key) for key in self.STASHING_ATTRS}
-        return self.stash
-
-
-    def restore_attrs(self) -> None:
-        for key, val in self.stash.items():
-            setattr(self, key, val)
-    
-
-    def close(self) -> None:
-
-        if not self.closed:
-            self._cam.close()
-            self._cam = None
-
-            
-    def reopen(self) -> None:
-        if not self.closed:
-            self.close()
-
-        resolution  = self.stash['resolution']
-        framerate   = self.stash['framerate']
-        sensor_mode = self.stash['sensor_mode']
-        self._cam = picamera.PiCamera(resolution=resolution,
-                                      framerate=framerate,
-                                      sensor_mode=sensor_mode)
-        time.sleep(2)
-        
-    #-----------------------------------------------------------#
-    # Networking
-
-                                                
-    #-----------------------------------------------------------#
-    # Private/protected methods.
-    
-
-
-
-
-    def _init_outfile(self,
-                      path: PathLike,
-                      duration: float,
-                      overwrite: bool = False,
-                      ) -> None:
-
-        path = Path(path)
-        if path.exists():
-            if overwrite:
-                path.unlink()
-            else:
-                raise FileExistsError(path)
-
-        ext = path.suffix.lower()
-        if ext not in ('.h5', '.hdf5'):
-            raise NotImplementedError(f'invalid file path: {str(path)}')
-                
-        n_frames = int(np.ceil(self.framerate * duration))   
-        shape = (n_frames, *self.out_shape)
-        outfile = H5WriteStream(path, shape, dtype=np.uint8)
-        return outfile
-
-                            
 
     def __repr__(self):
 
@@ -494,19 +461,19 @@ class Camera:
         s += f'sensor mode: {self.sensor_mode}\n'
         s += f'resolution: {self.resolution}\n'
         s += f'channels: {str(self.channels)}\n'
-        s += f'framerate (?): {self.framerate}\n'
-        
+        s += f'"framerate": {self.framerate}\n'
+
         s += f'exposure mode: {self.exposure_mode}'
         if self.exposure_mode == 'off':
             s += ' (gain locked at current values)'
         s += '\n'
-        
+
         s += f'analog gain: {float(self.analog_gain)}\n'
         s += f'digital gain: {float(self.digital_gain)}\n'
-        s += f'ISO : {self.iso}\n'
-        s += f'exposure speed: {self.exposure_speed} microsec.\n'
-        s += f'shutter speed: {self.shutter_speed} microsec.\n'
-        
+        s += f'iso : {self.iso}\n'
+        s += f'exposure speed: {self.exposure_speed} usec.\n'
+        s += f'shutter speed: {self.shutter_speed} usec.\n'
+
 
         # Report auto-white balance.
         s += f'awb mode: {self.awb_mode}\n'
@@ -516,18 +483,6 @@ class Camera:
         return s
 
 
-def send_frame(socket,
-               frame: Frame,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> None:
 
-    md = {'shape': frame.data.shape,
-          'dtype': str(frame.data.dtype),
-          'index': frame.index,
-          'timestamp' : frame.timestamp}
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(frame.data.tobytes(), flags, copy=copy, track=track)  
-    
-            
+
+
