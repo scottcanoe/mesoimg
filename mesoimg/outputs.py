@@ -138,30 +138,32 @@ class FramePublisher(Thread):
         self.sock.hwm = hwm
         self.topic = topic
 
-        # self.poller = zmq.Poller()
-        # self.poller.register(self.sock, zmq.POLLOUT)
-
         self.cam = cam
         self.timeout = timeout
-
+        self._terminate = False
         if start:
             self.start()
 
 
     def run(self):
 
+        # Alias
+        sock = self.sock
+        cam = self.cam
+        cond = cam.new_frame
+        timeout = self.timeout
+
         self._terminate = False
         cond = self.cam.new_frame
         with cond:
             while not self._terminate:
-                ready = cond.wait(self.timeout)
+                ready = cond.wait(timeout)
                 if not ready:
                     continue
-                with self.cam.lock:
-                    frame = self.cam.frame
-                print(f'Got frame: {frame.index}')
-                pub_frame(self.sock, frame)
-        self.sock.close()
+                with cam.lock:
+                    frame = cam.frame
+                pub_frame(sock, frame)
+        sock.close()
         time.sleep(0.01)
 
 
