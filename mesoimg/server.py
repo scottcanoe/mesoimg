@@ -3,6 +3,7 @@ from threading import Event, Lock, Thread
 import time
 from time import perf_counter as clock
 from typing import Any, Dict, List, Union
+import glom
 import numpy as np
 import zmq
 from mesoimg.common import *
@@ -14,9 +15,13 @@ from mesoimg.outputs import *
 class MesoServer:
 
 
-    verbose = False
+    verbose: bool = False
+
+    _terminate: bool = False
+
 
     def __init__(self, start: bool = True):
+
 
         self.sockets = {}
         self.threads = {}
@@ -29,17 +34,26 @@ class MesoServer:
         self.cmd_timeout = 1.0
         self.sockets['cmd'] = self.cmd_sock
 
+        # Set up request handling.
+        self._request_handlers = {'get' : self._handle_get,
+                                  'set' : self._handle_set,
+                                  'call': self._handle_call}
+
         # Open camera, and prepare to publish frames.
         self.cam = Camera()
         self.frame_publisher = FramePublisher(self.ctx, self.cam)
         self.threads['frame_publisher'] = self.frame_publisher
 
+        self._started = False
+        self._running = False
         self._terminate = False
 
         if start:
             self.run()
 
 
+    #--------------------------------------------------------------------------#
+    # Main event loop
 
 
     def run(self):
@@ -64,6 +78,10 @@ class MesoServer:
 
         """
 
+        if self._started:
+            print('Server has already run.')
+            return
+
         print('Server ready.', flush=True)
 
         # Alias
@@ -71,6 +89,8 @@ class MesoServer:
         poller = self.cmd_poller
         timeout = self.cmd_timeout
 
+        self._started = True
+        self._running = True
         self._terminate = False
         while not self._terminate:
 
@@ -85,172 +105,20 @@ class MesoServer:
             if not (sock in ready and ready[sock] == zmq.POLLIN):
                 continue
             req = sock.recv_json()
-            if self.verbose:
-                print(f'Received request: {req}', flush=True)
-
-            # Check action.
-            if 'action' not in req:
-                self._return_error(RuntimeError('no action in request.'))
-                continue
-            action = req['action']
-            if action not in ('get', 'set', 'call'):
-                self._return_error(RuntimeError(f'invalid action: {action}'))
-                continue
-
-            # Check target.
-            if 'target' not in req:
-                self._return_error(RuntimeError('no target in request.'))
-                continue
-            target = req['target']
-            if target not in ('cam', 'server'):
-                self._return_error(RuntimeError(f'invalid target: {target}'))
-                continue
-            target = self.cam if target == 'cam' else self
-
-            # Check key.
-            if 'key' not in req:
-                self._return_error(RuntimeError('no key in request.'))
-                continue
-            key = req['key']
-
-
-            # Handle get request.
-            if action == 'get':
-                self._handle_get(target, key)
-                continue
-
-            # Handle set request.
-            if action == 'set':
-                if 'val' not in req:
-                    self._return_error(RuntimeError('no value in set request.'))
-                    continue
-                self._handle_set(target, key, req['val'])
-                continue
-
-            # Handle call request.
-            args, kw = req.get('args', []), req.get('kw', {})
-            self._handle_call(target, key, args, kw)
+            self._handle_request(req)
             continue
 
 
-        # Finally, close down.
-        self._cleanup()
-        print('Server closed.')
-
+        # Finally, shut everything down neatly.
+        self._shutdown()
 
 
     def close(self) -> str:
-        self._terminate = True
+            self._terminate = True
 
 
-    def start_preview(self):
-        self.cam_thread = Thread(target=self.cam.start_preview)
-        self.cam_thread.start()
-        return 0
-
-
-    def stop_preview(self):
-        self.cam._stop = True
-        return 0
-
-    def start_recording(self, duration):
-        self.cam_thread = Thread(target=self.cam.start_recording,
-                                 args=(duration,))
-        self.cam_thread.start()
-        return 0
-
-    def stop_recording(self):
-        self.cam._stop = True
-        return 0
-
-
-    #--------------------------------------------------------------------------#
-    # get/set/call handlers
-
-
-    def _handle_get(self,
-                    target: Union['MesoServer', Camera],
-                    key: str,
-                    ) -> None:
-        try:
-            self._return_val(getattr(target, key))
-        except Exception as exc:
-            self._return_error(exc)
-
-
-    def _handle_set(self,
-                    target: Union['MesoServer', Camera],
-                    key: str,
-                    val: Any,
-                    ) -> None:
-
-        try:
-            self._return_val(setattr(target, key, val))
-        except Exception as exc:
-            self._return_error(exc)
-
-
-    def _handle_call(self,
-                     target: Union['MesoServer', Camera],
-                     key: str,
-                     args: List,
-                     kw: Dict,
-                     ) -> None:
-
-        try:
-            fn = getattr(target, key)
-            self._return_val(fn(*args, **kw))
-        except Exception as exc:
-            self._return_error(exc)
-            return
-
-
-    #--------------------------------------------------------------------------#
-    # stdin handlers
-
-
-    def _handle_stdin(self, line: str) -> None:
-        line = 'self.' + line
-        exec(line)
-
-
-    #--------------------------------------------------------------------------#
-    # client messaging
-
-    """
-    type: 'return', 'error'
-
-    """
-
-    def _reply(self, rep: Dict) -> None:
-        if self.verbose:
-            print(f'Sending reply: {rep}')
-        self.cmd_sock.send_json(rep)
-        time.sleep(0.05)
-
-
-    def _return_val(self, val: Any = '') -> None:
-
-        val = '' if val is None else val
-        rep = {'type' : 'return', 'val' : val}
-        self._reply(rep)
-
-
-    def _return_error(self, exc: Exception) -> None:
-
-        msg = str(repr(exc))
-        print('ERROR: ' + msg, flush=True)
-        rep = {'type' : 'error', 'val' : msg}
-        self._reply(rep)
-
-
-    #--------------------------------------------------------------------------#
-    #
-
-    def _cleanup(self):
-        """
-        Prepare to close/exit the server.
-        """
+    def _shutdown(self) -> None:
+        """Shut everything down neatly."""
         print('Closing sockets.')
         for sock in self.sockets.values():
             sock.close()
@@ -260,5 +128,94 @@ class MesoServer:
         self.cam.close()
         time.sleep(1.5)
         self.ctx.term()
+        self._running = False
+        print('Server closed.')
+
+
+    #--------------------------------------------------------------------------#
+    # Sending methods
+
+
+    def send(self, rep: Dict) -> None:
+        """
+        Return through here to utilize verbosity.
+        """
+        if self.verbose:
+            print(f'Sending reply: {rep}')
+        self.cmd_sock.send_json(rep)
+        time.sleep(0.005)
+
+
+    def send_return(self, val: Any = None) -> None:
+
+        rep = {'type' : 'return', 'val' : val}
+        self.send(rep)
+
+
+    def send_error(self, exc: Exception) -> None:
+
+        msg = str(repr(exc))
+        print('ERROR: ' + msg, flush=True)
+        rep = {'type' : 'error', 'val' : msg}
+        self.send(rep)
+
+
+    #--------------------------------------------------------------------------#
+    # Receiving methods
+
+
+    def _handle_request(self, req: Dict) -> None:
+
+        if self.verbose:
+            print(f'Received request: {req}', flush=True)
+
+        rtype = req.get('type', None)
+        if rtype not in self._request_handlers.keys():
+            self.send_error(RuntimeError(f'invalid request type {rtype}.'))
+
+        self._request_handlers[rtype](req)
+
+
+
+    def _handle_get(self, req: Dict) -> None:
+        """
+        Handle a get request from the client.
+        """
+        try:
+            self.send_return(glom.glom(self, req['key']))
+        except Exception as exc:
+            self.send_error(exc)
+
+
+    def _handle_set(self, req: Dict) -> None:
+        """
+        Handle a set request from the client.
+        """
+        try:
+            glom.assign(self, req['key'], req['val'])
+            self.send_return()
+        except Exception as exc:
+            self.send_error(exc)
+
+
+    def _handle_call(self, req: Dict) -> None:
+
+        try:
+            fn = glom.glom(self, req['key'])
+            val = fn(*req['args'], **req['kw'])
+            self.send_return(val)
+        except Exception as exc:
+            self.send_error(exc)
+
+
+    def _handle_stdin(self, chars: str) -> None:
+        chars = 'self.' + chars if not chars.startswith('self.') else chars
+        exec(chars)
+
+
+    #--------------------------------------------------------------------------#
+    # etc.
+
+
 
 

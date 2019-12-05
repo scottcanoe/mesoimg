@@ -3,6 +3,7 @@ from enum import IntEnum
 import os
 import pathlib
 from pathlib import Path
+from pprint import PrettyPrinter
 import select
 import sys
 from threading import Event
@@ -56,6 +57,8 @@ __all__ = [
     'squeeze',
     'today',
     'repr_secs',
+    'pprint',
+    'pformat',
 ]
 
 
@@ -77,9 +80,9 @@ class Ports(IntEnum):
     """
     Enum for holding port numbers.
     """
-    COMMAND   = 7000
-    FRAME_PUB = 7001
-
+    COMMAND    = 7000
+    FRAME_PUB  = 7001
+    STATUS_PUB = 7002
 
 class Frame(NamedTuple):
     """
@@ -367,3 +370,11 @@ def repr_secs(secs):
 
 
 
+printer = PrettyPrinter()
+
+def pprint(obj: Any) -> None:
+    printer.pprint(obj)
+
+
+def pformat(obj: Any) -> str:
+    return printer.pformat(obj)

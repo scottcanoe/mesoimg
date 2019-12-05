@@ -91,8 +91,6 @@ class Camera:
         self._configs['default'] = self._DEFAULT_CONFIG.copy()
         self.init_cam(config)
 
-        self.frame_queue = Queue(maxsize=10)
-
         self.lock = Lock()
         self.frame = None
         self.new_frame = Condition()
@@ -347,23 +345,6 @@ class Camera:
 
 
 
-    def test(self, duration: float = 2.0, interval: float = 1.0) -> None:
-
-        self._reset()
-        self._countdown_timer = CountdownTimer(duration)
-
-        self._cam.start_recording(self._frame_buffer, 'rgb')
-        while True:
-            self._cam.wait_recording(interval)
-            if self._countdown_timer() <= 0:
-                break
-        self._cam.stop_recording()
-
-        n_frames = self._frame_counter - 1
-        fps = n_frames / duration
-        print(f'Produced {n_frames} frames in {duration} secs. (fps={fps})', flush=True)
-
-
     #--------------------------------------------------------------------------#
     # Recording/previewing
 
@@ -449,6 +430,22 @@ class Camera:
         if index % 30 == 0:
             print(f'Frame: {index}', flush=True)
 
+
+    def test(self, duration: float = 2.0, interval: float = 1.0) -> None:
+
+        self._reset()
+        self._countdown_timer = CountdownTimer(duration)
+
+        self._cam.start_recording(self._frame_buffer, 'rgb')
+        while True:
+            self._cam.wait_recording(interval)
+            if self._countdown_timer() <= 0:
+                break
+        self._cam.stop_recording()
+
+        n_frames = self._frame_counter - 1
+        fps = n_frames / duration
+        print(f'Produced {n_frames} frames in {duration} secs. (fps={fps})', flush=True)
 
 
     def __repr__(self):

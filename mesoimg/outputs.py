@@ -184,6 +184,72 @@ class FramePublisher(Thread):
 
 
 
+class StatusPublisher(Thread):
+
+
+    def __init__(self,
+                 ctx,
+                 cam: 'Camera',
+                 topic: str = 'status',
+                 hwm: int = 10,
+                 timeout: float = 1.0,
+                 enabled: bool = True,
+                 start: bool = True,
+                 ):
+
+        super().__init__()
+
+        self.sock = ctx.socket(zmq.PUB)
+        self.sock.bind(f'tcp://*:{Ports.STATUS_PUB}')
+        self.sock.hwm = hwm
+        self.topic = topic
+
+        self.cam = cam
+        self.timeout = timeout
+
+        self.enabled = enabled
+        self._terminate = False
+        if start:
+            self.start()
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
+    @enabled.setter
+    def enabled(self, tf: bool) -> None:
+        assert isinstance(tf, bool)
+        self._enabled = True
+
+
+    def run(self):
+
+        # Alias
+        sock = self.sock
+        cam = self.cam
+        cond = cam.new_frame
+        timeout = self.timeout
+
+        self._terminate = False
+        cond = self.cam.new_frame
+        with cond:
+            while not self._terminate:
+                if not self._enabled:
+                    time.sleep(1)
+                    continue
+                ready = cond.wait(timeout)
+                if not ready:
+                    continue
+                with cam.lock:
+                    status = cam.status
+                sock.send_json(status)
+
+        sock.close()
+        time.sleep(0.01)
+
+
+    def close(self):
+        self._terminate = True
 
 
 
