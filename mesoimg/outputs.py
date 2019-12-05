@@ -124,7 +124,6 @@ class FramePublisher(Thread):
     def __init__(self,
                  ctx,
                  cam: 'Camera',
-                 # cond: Condition,
                  topic: str = 'frame',
                  hwm: int = 10,
                  timeout: float = 1.0,
@@ -163,14 +162,13 @@ class FramePublisher(Thread):
                 with cam.lock:
                     frame = cam.frame
                 pub_frame(sock, frame)
+
         sock.close()
         time.sleep(0.01)
 
 
     def close(self):
         self._terminate = True
-        time.sleep(self.timeout + 0.5)
-
 
 
 

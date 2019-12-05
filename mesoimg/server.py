@@ -27,8 +27,9 @@ class MesoServer:
         self.cmd_timeout = 1.0
         self.sockets['cmd'] = self.cmd_sock
 
+        # Open camera, and prepare to publish frames.
         self.cam = Camera()
-
+        self.frame_publisher = FramePublisher(self.ctx, self.cam)
         self._terminate = False
         self.run()
 
@@ -57,16 +58,17 @@ class MesoServer:
 
         """
 
+        print('Starting server.', flush=True)
+
         # Alias
         sock = self.cmd_sock
         poller = self.cmd_sock.poller
         timeout = self.cmd_timeout
 
-
         self._terminate = False
-
-        print('Ready for commands.', flush=True)
         while not self.terminate:
+
+            # Poll for request from client.
             ready = dict(poller.poll(timeout))
             if not (sock in ready and ready[sock] == zmq.POLLIN):
                 continue
@@ -74,26 +76,26 @@ class MesoServer:
 
             # Check action.
             if 'action' not in req:
-                self.send_exception(RuntimeError('no action in request.'))
+                self._return_error(RuntimeError('no action in request.'))
                 continue
             action = req['action']
             if action not in ('get', 'set', 'call'):
-                self.send_exception(RuntimeError(f'invalid action: {action}'))
+                self._return_error(RuntimeError(f'invalid action: {action}'))
                 continue
 
             # Check target.
             if 'target' not in req:
-                self.send_exception(RuntimeError('no target in request.'))
+                self._return_error(RuntimeError('no target in request.'))
                 continue
             target = req['target']
             if target not in ('cam', 'server'):
-                self.send_exception(RuntimeError(f'invalid target: {target}'))
+                self._return_error(RuntimeError(f'invalid target: {target}'))
                 continue
             target = self.cam if target == 'cam' else self
 
             # Check key.
             if 'key' not in req:
-                self.send_exception(RuntimeError('no key in request.'))
+                self._return_error(RuntimeError('no key in request.'))
                 continue
             key = req['key']
 
@@ -106,7 +108,7 @@ class MesoServer:
             # Handle set request.
             if action == 'set':
                 if 'val' not in req:
-                    self.send_exception(RuntimeError('no value in set request.'))
+                    self._return_error(RuntimeError('no value in set request.'))
                     continue
                 self._handle_set(target, key, req['val'])
                 continue
@@ -117,22 +119,14 @@ class MesoServer:
             continue
 
 
+        # Finally, close down.
+        self._cleanup()
 
 
-    def close(self):
 
+    def close(self) -> str:
+        print('Closing server.')
         self._terminate = True
-        time.sleep(self.cmd_timeout + 1.0)
-
-        for name, sock in self.sockets.items():
-            if name != 'cmd':
-                sock.close()
-        for thread in self.threads.values():
-            thread.close()
-        self.cam.close()
-
-        self.cmd_sock.send_json()
-
 
 
     def start_preview(self):
@@ -165,9 +159,9 @@ class MesoServer:
                     key: str,
                     ) -> None:
         try:
-            self._return_value(getattr(target, key))
+            self._return_val(getattr(target, key))
         except Exception as exc:
-            self._return_exception(exc)
+            self._return_error(exc)
 
 
     def _handle_set(self,
@@ -177,9 +171,9 @@ class MesoServer:
                     ) -> None:
 
         try:
-            self._return_value(setattr(target, key, val))
+            self._return_val(setattr(target, key, val))
         except Exception as exc:
-            self._return_exception(exc)
+            self._return_error(exc)
 
 
     def _handle_call(self,
@@ -191,9 +185,9 @@ class MesoServer:
 
         try:
             fn = getattr(target, key)
-            self._return_value(fn(*args, **kw))
+            self._return_val(fn(*args, **kw))
         except Exception as exc:
-            self._return_exception(exc)
+            self._return_error(exc)
             return
 
 
@@ -205,31 +199,39 @@ class MesoServer:
 
     """
 
-    def _return_value(self, val: Any = '', info: str = '') -> None:
+    def _return_val(self, val: Any = '', info: str = '') -> None:
 
         val = '' if val is None else val
-        rep = {'class' : 'value',
-               'value' : val,
+        rep = {'type' : 'val',
+               'val' : val,
                'info' : info}
         self.cmd_sock.send_json(rep)
         time.sleep(0.05)
 
 
-    def _return_exception(self, exc: Exception, info: Any = '') -> None:
+    def _return_error(self, exc: Exception, info: Any = '') -> None:
 
-        exc_string = str(repr(exc))
-        print(exc_string, flush=True)
-        rep = {'class' : 'exception',
-               'exception' : exc_string,
+        msg = str(repr(exc))
+        print(msg, flush=True)
+        rep = {'type' : 'error',
+               'error' : msg,
                'info' : info}
         self.cmd_sock.send_json(rep)
         time.sleep(0.05)
 
 
+    #--------------------------------------------------------------------------#
+    #
 
-
-
-
+    def _cleanup(self):
+        """
+        Prepare to close/exit the server.
+        """
+        for sock in self.sockets.values():
+            sock.close()
+        for thread in self.threads.values():
+            thread.close()
+        self.cam.close()
 
 
 
