@@ -1,4 +1,4 @@
-from queue import Queue
+import sys
 from threading import Event, Lock, Thread
 import time
 from time import perf_counter as clock
@@ -20,8 +20,9 @@ class MesoServer:
     _terminate: bool = False
 
 
-    def __init__(self, start: bool = True):
+    def __init__(self):
 
+        print('Initializing MesoServer.')
 
         self.sockets = {}
         self.threads = {}
@@ -48,8 +49,7 @@ class MesoServer:
         self._running = False
         self._terminate = False
 
-        if start:
-            self.run()
+        self.run()
 
 
     #--------------------------------------------------------------------------#
@@ -210,12 +210,17 @@ class MesoServer:
 
     def _handle_stdin(self, chars: str) -> None:
         chars = 'self.' + chars if not chars.startswith('self.') else chars
-        exec(chars)
+        try:
+            exec(chars)
+        except Exception as exc:
+            print(repr(exc))
 
 
     #--------------------------------------------------------------------------#
     # etc.
 
 
+def write_prompt():
+    sys.stdout.write('>>> ')
 
 
