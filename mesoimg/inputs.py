@@ -14,25 +14,25 @@ HOST = 'pi-meso.local'
 class Subscriber(Thread):
 
     #: Wrapped zmq socket.
-    socket: ZMQSocket
-    
+    socket: zmq.Socket
+
     #: Socket's poller for non-blocking I/O.
-    poller: ZMQPoller
-    
+    poller: zmq.Poller
+
     #: The queue onto which newly arrived data will be pushed onto.
     q: Queue
-    
+
     #: How long to wait for new data for each iteration of the event loop.
     _timeout: float = 1.0
-    
+
     #: Whether we're running the event loop.
     _running: bool = False
-    
-    #: Whether to stop the thread at soonest convenience. 
+
+    #: Whether to stop the thread at soonest convenience.
     _terminate: bool = False
-    
+
     def __init__(self,
-                 ctx,
+                 ctx: Optional[zmq.Context],
                  host: str,
                  port: Union[int, str],
                  topic: Union[bytes, str],
@@ -45,22 +45,24 @@ class Subscriber(Thread):
 
         super().__init__()
 
+        if ctx is None:
+            ctx = zmq.Context.instance()
 
         self.sock = ctx.socket(zmq.SUB)
         topic = topic.encode() if isinstance(topic, str) else topic
         self.sock.subscribe = topic
         self.sock.hwm = hwm
         self.sock.connect(f'tcp://{host}:{port}')
-        
+
         self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLIN)                
-        
+        self.poller.register(self.sock, zmq.POLLIN)
+
         self.timeout = timeout
 
-        
-        self.q = q          
+
+        self.q = q
         self.lock = Lock()
-        
+
         self._terminate = False
         if start:
             self.start()
@@ -72,7 +74,7 @@ class Subscriber(Thread):
         sock = self.sock
         poller = self.poller
         timeout = self.timeout
-        
+
         self._terminate = False
         while not self._terminate:
 
@@ -118,11 +120,11 @@ class FrameSubscriber(Thread):
         self.sock.hwm = hwm
         self.sock.connect(f'tcp://{HOST}:{Ports.FRAME_PUB}')
         self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLIN)                
+        self.poller.register(self.sock, zmq.POLLIN)
         self.timeout = timeout
-        
+
         self.q = q
-        
+
         self.enabled = enabled
         self._terminate = False
         if start:
@@ -144,7 +146,7 @@ class FrameSubscriber(Thread):
         sock = self.sock
         poller = self.poller
         timeout = self.timeout
-        
+
         self._terminate = False
         while not self._terminate:
             if not self._enabled:
@@ -170,16 +172,16 @@ class FrameSubscriber(Thread):
 
 
 
-    
+
 class FrameConsumer(Thread):
 
     # belongs to client, and is modified by frame subscriber.
     q: Queue
-    
+
     verbose = False
 
     def __init__(self,
-                 q: Queue,        
+                 q: Queue,
                  timeout: float = 1.0,
                  enabled: bool = True,
                  start: bool = True,
@@ -208,7 +210,7 @@ class FrameConsumer(Thread):
 
         # Alias
         timeout = self.timeout
-        
+
         self._terminate = False
         while not self._terminate:
             if not self._enabled:
@@ -217,10 +219,10 @@ class FrameConsumer(Thread):
                 frame = self.q.get(timeout=timeout)
             except queue.Empty:
                 continue
-            
+
             # Do... something with the frame.
-            
-            
+
+
             if self.verbose:
                 print(f'Received frame: {frame.index}', flush=True)
 
@@ -228,16 +230,16 @@ class FrameConsumer(Thread):
 
     def close(self):
         self._terminate = True
-        
+
 
 
 class H5Receiver(Thread):
-    
+
     """
     Receives frames from frame socket. Only stores 1-most recent.
-    
+
     """
-    
+
     def __init__(self, frame_sock, path, shape, dtype=np.uint8):
         super().__init__()
         self.frame_sock = frame_sock
@@ -246,38 +248,38 @@ class H5Receiver(Thread):
         self.n_received = 0
         self.t_last = None
         self.terminate = False
-        
+
         self.path = Path(path)
         self.file = h5py.File(str(self.path), 'w')
-        
+
         self.max_frames = shape[0]
         self.dset = self.file.create_dataset('data', shape, dtype=dtype)
         self.dset.attrs['index'] = 0
         self.ts = self.file.create_dataset('timestamps', (shape[0],), dtype=float)
-        
+
         self.complete = False
         self.terminate = False
-        
-        
 
 
-    
+
+
+
     def run(self):
-        
+
         global frame
         global n_received
-        
+
         frame = None
         n_received = 0
-        
+
         while not self.terminate:
 
             fm = recv_frame(self.frame_sock)
             frame = fm
             n_received += 1
-            
+
             with self.lock:
-                if not self.complete:                    
+                if not self.complete:
                     index = self.dset.attrs['index']
                     self.dset[index, ...] = fm.data
                     self.ts[index] = fm.timestamp
@@ -288,4 +290,4 @@ class H5Receiver(Thread):
                         self.terminate = True
                     self.frame = fm
                     self.n_received += 1
-                    
+

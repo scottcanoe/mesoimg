@@ -28,7 +28,12 @@ class MesoClient:
     verbose = False
     _state = 'waiting'
 
-    def __init__(self, start: bool = True):
+    def __init__(self,
+                 ctx: Optional[zmq.Context],
+                 start: bool = True):
+
+        if ctx is None:
+            ctx = zmq.Context.instance()
 
         self.sockets = {}
         self.threads = {}

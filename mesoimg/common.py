@@ -25,9 +25,6 @@ import zmq
 __all__ = [
 
     # Networking
-    'ZMQContext',
-    'ZMQSocket',
-    'ZMQPoller',
     'Ports',
     'Frame',
     'send_array',
@@ -71,11 +68,6 @@ __all__ = [
 # Networking
 
 
-ZMQContext = zmq.sugar.context.Context
-ZMQSocket = zmq.sugar.socket.Socket
-ZMQPoller = zmq.sugar.Poller
-
-
 class Ports(IntEnum):
     """
     Enum for holding port numbers.
@@ -95,7 +87,7 @@ class Frame(NamedTuple):
     timestamp: float
 
 
-def send_array(socket: ZMQSocket,
+def send_array(socket: zmq.Socket,
                arr: np.ndarray,
                flags: int = 0,
                copy: bool = True,
@@ -109,7 +101,7 @@ def send_array(socket: ZMQSocket,
     socket.send(arr, flags, copy, track)
 
 
-def recv_array(socket: ZMQSocket,
+def recv_array(socket: zmq.Socket,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
@@ -122,7 +114,7 @@ def recv_array(socket: ZMQSocket,
     return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
 
-def pub_array(socket: ZMQSocket,
+def pub_array(socket: zmq.Socket,
               arr: np.ndarray,
               topic: str,
               flags: int = 0,
@@ -137,7 +129,7 @@ def pub_array(socket: ZMQSocket,
     send_array(socket, arr, flags, copy, track)
 
 
-def sub_array(socket: ZMQSocket,
+def sub_array(socket: zmq.Socket,
               flags: int = 0,
               copy: bool = True,
               track: bool = False,
@@ -151,7 +143,7 @@ def sub_array(socket: ZMQSocket,
     return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
 
-def send_frame(socket: ZMQSocket,
+def send_frame(socket: zmq.Socket,
                frame: Frame,
                flags: int = 0,
                copy: bool = True,
@@ -168,7 +160,7 @@ def send_frame(socket: ZMQSocket,
     socket.send(frame.data, flags, copy, track)
 
 
-def recv_frame(socket: ZMQSocket,
+def recv_frame(socket: zmq.Socket,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
@@ -183,7 +175,7 @@ def recv_frame(socket: ZMQSocket,
     return Frame(data, index=md['index'], timestamp=md['timestamp'])
 
 
-def pub_frame(socket: ZMQSocket,
+def pub_frame(socket: zmq.Socket,
               frame: Frame,
               topic: str,
               flags: int = 0,
@@ -197,7 +189,7 @@ def pub_frame(socket: ZMQSocket,
     send_frame(socket, frame, flags, copy, track)
 
 
-def sub_frame(socket: ZMQSocket,
+def sub_frame(socket: zmq.Socket,
               flags: int = 0,
               copy: bool = True,
               track: bool = False,
