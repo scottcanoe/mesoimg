@@ -27,12 +27,12 @@ class MesoClient:
 
     verbose = False
     _state = 'waiting'
-    
+
     def __init__(self, start: bool = True):
 
         self.sockets = {}
         self.threads = {}
-    
+
         self.ctx = zmq.Context()
         self.cmd_sock = self.ctx.socket(zmq.REQ)
         self.cmd_sock.connect(f'tcp://{HOST}:{Ports.COMMAND}')
@@ -40,25 +40,25 @@ class MesoClient:
         self.cmd_poller.register(self.cmd_sock, zmq.POLLIN | zmq.POLLOUT)
         self.cmd_timeout = 1.0
         self.sockets['cmd'] = self.cmd_sock
-    
+
         # Setup reply handlers.
         self._reply_handlers = {'return' : self._handle_return,
                                 'error'  : self._handle_error}
-    
+
         # Setup conditions, events, etc.
         self.new_frame = Condition()
         self.frame_q = Queue(maxsize=30)
-    
+
         # Open camera, and prepare to publish frames.
         self.frame_subscriber = FrameSubscriber(self.ctx, self.frame_q)
         self.threads['frame_publisher'] = self.frame_subscriber
-    
+
         self._prev_request = None
         self._terminate = False
         if start:
             self.run()
-        
-    
+
+
     @property
     def status(self):
         return self.send_get('cam.status')
@@ -70,7 +70,7 @@ class MesoClient:
     @property
     def exposure_mode(self) -> str:
         return self.send_get('cam.exposure_mode')
-    
+
     @exposure_mode.setter
     def exposure_mode(self, mode: str) -> str:
         self.send_set('cam.exposure_mode', mode)
@@ -78,27 +78,27 @@ class MesoClient:
     @property
     def exposure_speed(self) -> str:
         return self.send_get('cam.exposure_speed')
-        
+
     @property
     def framerate(self) -> str:
         return self.send_get('cam.framerate')
-    
+
     @framerate.setter
     def framerate(self, rate: int) -> str:
         self.send_set('cam.framerate', rate)
-    
+
     @property
     def iso(self) -> str:
         return self.send_get('cam.iso')
-    
+
     @iso.setter
     def iso(self, val: int) -> str:
         self.send_set('cam.iso', val)
-        
+
     @property
     def shutter_speed(self) -> str:
         return self.send_get('cam.shutter_speed')
-    
+
     @shutter_speed.setter
     def shutter_speed(self, speed: int) -> None:
         self.send_set('cam.shutter_speed', speed)
@@ -106,55 +106,55 @@ class MesoClient:
     @property
     def resolution(self) -> Tuple[int, int]:
         return self.send_get('cam.resolution')
-        
+
     @resolution.setter
     def resolution(self, res: Tuple[int, int]) -> str:
         self.send_set('cam.resolution', res)
 
     #------------------------------------------------------------------------------------#
     # Main event loop
-    
+
     def run(self):
         """
         Event loop that read user input from stdin, interprets them as requests,
         sends requests, and finally handles replies.
-        
+
         The target object (the 'base' of the namespace) is implicitly the client
         instance itself.
-        
-        
+
+
         """
-        
+
         print('Client ready.', flush=True)
         # Alias
         sock = self.cmd_sock
         poller = self.cmd_poller
         timeout = self.cmd_timeout
-        
+
         self._terminate = False
         while not self._terminate:
-            
+
             # Check for stdin.
-            chars = read_stdin().strip()
-            if chars:
+            if poll_stdin():
+                chars = read_stdin()
                 self._handle_stdin(chars)
-        
+
             # Check for replies.
             ready = dict(poller.poll(timeout * 1000))
             if sock in ready and ready[sock] == zmq.POLLIN:
                 rep = sock.recv_json()
                 self._handle_reply(rep)
-                
+
 
         # Finally, shut everything down neatly.
         self._shutdown()
 
-    
+
     def close(self):
         """Close the client only. Does not close server or other services."""
         self._terminate = True
-        
-    
+
+
     def _shutdown(self) -> None:
         """Shut everything down neatly."""
         print('Closing sockets.')
@@ -166,9 +166,9 @@ class MesoClient:
         time.sleep(0.5)
         self.ctx.term()
         self._running = False
-        print('Client closed.') 
-    
-    
+        print('Client closed.')
+
+
     #------------------------------------------------------------------------------------#
     # Sending methods
 
@@ -180,9 +180,9 @@ class MesoClient:
         if self.verbose:
             print(f'Sending request: {req}', flush=True)
         self._prev_request = req
-        self.cmd_sock.send_json(req)    
-        
-        
+        self.cmd_sock.send_json(req)
+
+
     def send_get(self, key: str) -> Any:
         """
         Main gateway for retrieving attributes from the server's side. The server
@@ -197,8 +197,8 @@ class MesoClient:
         req = {'type' : 'get',
                'key'  : key}
         return self.send(req)
-    
-    
+
+
     def send_set(self, key: str, val: Any) -> Any:
         """
         Main gateway for setting attributes on the server side. The server instance
@@ -210,14 +210,14 @@ class MesoClient:
           - 'key' : list     Name of attribute to set.
           - 'val' : dict     Attribute's new value.
 
-          
+
         """
         req = {'type' : 'set',
                'key' : key,
                'val' : val}
         return self.send(req)
-    
-    
+
+
     def send_call(self,
                   key: str,
                   args: Optional[List] = None,
@@ -227,7 +227,7 @@ class MesoClient:
         Main gateway for calling methods on the server side. The server instance
         is the target (implicitly). Use this method to ensures that that the request
         is well-formed. Provided as a convenience.
-        
+
         Call requests have the following structure:
           - 'type' : str     Always 'call'.
           - 'key' : str      Name of method to call.
@@ -235,7 +235,7 @@ class MesoClient:
           - 'kw' : dict      A possibly empty dictionary of keyword arguments.
 
         """
-        
+
         args = [] if args is None else args
         kw = {} if kw is None else kw
         req = {'type' : 'call',
@@ -243,24 +243,24 @@ class MesoClient:
                'args' : args,
                'kw' : kw}
         return self.send(req)
-        
+
 
     #------------------------------------------------------------------------------------#
     # Receiving methods
 
 
     def _handle_reply(self, rep: Dict) -> None:
-        
+
         if self.verbose:
             print(f'Received reply: {rep}', flush=True)
-        
+
         rtype = rep.get('type', None)
         if rtype not in self._reply_handlers.keys():
             pprint(RuntimeError(f'invalid request type {rtype}.'))
 
         self._reply_handlers[rtype](rep)
-        
-        
+
+
     def _handle_return(self, rep: Dict) -> None:
         """Handle a reply containing a return value."""
         val = rep['val']
@@ -279,7 +279,7 @@ class MesoClient:
         """
         Execute code sent entered into stdin. Chars will be prepended with `self`
         prior to execution.
-        
+
         Mimics normal access to the client's attributes and methods.
         """
         chars = 'self.' + chars if not chars.startswith('self.') else chars
@@ -292,19 +292,19 @@ class MesoClient:
     """
     How to have a previewer than uses frames_q?
     """
-    
+
     def warmup(self, timeout: float = 2.0) -> None:
         pass
-        
+
     def start_preview(self) -> None:
-        
+
         self.clear_frame_receiver()
         self.previewing = True
         self.t_start = clock()
         self.frame_receiver = PreviewReceiver(self.frame_sock, self.preview_sock)
         self.frame_receiver.start()
         return self.call('start_preview', target='server')
-        
+
 
     def stop_preview(self) -> None:
 
@@ -321,8 +321,8 @@ class MesoClient:
 
 
     def start_recording(self, path, duration) -> None:
-        
-        path = Path(path)        
+
+        path = Path(path)
         if path.exists():
             print(f'Location: {path} exists. Delete before recording.')
             return
@@ -331,7 +331,7 @@ class MesoClient:
         max_frames = int(duration * max_FPS)
         width, height = self.resolution
         shape = (max_frames, height, width)
-        
+
         self.clear_frame_receiver()
         self.recording = True
         self.t_start = clock()
@@ -342,14 +342,14 @@ class MesoClient:
                                          dtype=np.uint8)
         self.frame_receiver.start()
         return self.call('start_recording', args=[duration], target='server')
-        
-        
+
+
     def check_recording(self):
 
         if not self.recording:
             print('Not recording.')
             return
-            
+
         if self.frame_receiver.complete:
             print('H5 receiver full. Stopping recording.')
             self.stop_recording()
@@ -364,41 +364,41 @@ class MesoClient:
         t_stop = clock()
         elapsed = t_stop - self.t_start
         n_frames = self.frame_receiver.n_received
-        
+
         with self.frame_receiver.lock:
-            try:                
+            try:
                 self.frame_receiver.file.close()
                 self.frame_receiver.terminate = True
             except:
                 pass
-            
-                
+
+
         FPS = n_frames / elapsed
         print(f'Received {n_frames} frames in {elapsed:.2f} secs. (FPS={FPS:.2f})')
         return ret
-    
-    
 
-        
+
+
+
 
 def record(client, path, duration):
 
     path = Path(path)
     if path.exists():
         path.unlink()
-    
+
     client.start_recording(path, duration)
     time.sleep(duration)
     client.stop_recording()
-    
+
     f = h5py.File(str(path), 'r')
     dset = f['data']
     timestamps = f['timestamps']
     n_frames = dset.attrs['index']
     mov = dset[0:n_frames, :, :]
     ts = timestamps[0:n_frames]
-    f.close()    
-    
+    f.close()
+
     mp4_path = path.parent / 'mov.mp4'
     if mp4_path.exists():
         mp4_path.unlink()

@@ -28,10 +28,6 @@ def fnmatcher(pat: str) -> Callable[[str], bool]:
     return lambda s : s == pat
     
 
-
-
-
-
 def net_connections(kind: str = 'inet',
                     ip: Optional[str] = None,
                     port: Optional[int] = None,

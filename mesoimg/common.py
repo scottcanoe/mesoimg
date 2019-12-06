@@ -1,5 +1,7 @@
 from collections import namedtuple
 from enum import IntEnum
+import json
+import logging
 import os
 import pathlib
 from pathlib import Path
@@ -9,6 +11,7 @@ import sys
 from threading import Event
 import time
 from typing import (Any,
+                    Callable,
                     NamedTuple,
                     Tuple,
                     Union,
@@ -21,19 +24,26 @@ import zmq
 
 __all__ = [
 
-    # Constants/typing
-    'PathLike',
-    'pathlike',
-
     # Networking
+    'ZMQContext',
+    'ZMQSocket',
+    'ZMQPoller',
     'Ports',
     'Frame',
+    'send_array',
+    'recv_array',
+    'pub_array',
+    'sub_array',
     'send_frame',
     'recv_frame',
     'pub_frame',
     'sub_frame',
+    'poll_stdin',
+    'read_stdin',
 
-    # OS/filesystem
+    # Filesystem and data I/O.
+    'PathLike',
+    'pathlike',
     'pi_info',
     'remove',
     'read_json',
@@ -46,14 +56,9 @@ __all__ = [
     'write_h5',
     'write_mp4',
 
-    # URL/path handling
-    'urlparse',
-
-    # User interaction
-    'stdin_ready',
-    'read_stdin',
-
     # etc.
+    'is_contiguous',
+    'as_contiguous',
     'squeeze',
     'today',
     'repr_secs',
@@ -62,18 +67,13 @@ __all__ = [
 ]
 
 
-#-------------------------------------------------------------------#
-# Constants/typing
-
-PathLike = Union[str, pathlib.Path]
-
-def pathlike(obj: Any) -> bool:
-    """Determine whether an object is interpretable as a filesystem path."""
-    return isinstance(obj, (str, Path))
-
-
-#-------------------------------------------------------------------#
+#------------------------------------------------------------------------------#
 # Networking
+
+
+ZMQContext = zmq.sugar.context.Context
+ZMQSocket = zmq.sugar.socket.Socket
+ZMQPoller = zmq.sugar.Poller
 
 
 class Ports(IntEnum):
@@ -83,6 +83,7 @@ class Ports(IntEnum):
     COMMAND    = 7000
     FRAME_PUB  = 7001
     STATUS_PUB = 7002
+
 
 class Frame(NamedTuple):
     """
@@ -94,7 +95,63 @@ class Frame(NamedTuple):
     timestamp: float
 
 
-def send_frame(socket,
+def send_array(socket: ZMQSocket,
+               arr: np.ndarray,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
+    """
+    Send a `Frame` object over a zmq socket.
+    """
+    md = {'shape' : arr.shape, 'dtype' : str(arr.dtype)}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(arr, flags, copy, track)
+
+
+def recv_array(socket: ZMQSocket,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> np.ndarray:
+    """
+    Receive an ndarray over a zmq socket.
+    """
+    md = socket.recv_json(flags)
+    buf  = memoryview(socket.recv(flags, copy, track))
+    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+
+
+def pub_array(socket: ZMQSocket,
+              arr: np.ndarray,
+              topic: str,
+              flags: int = 0,
+              copy: bool = True,
+              track: bool = False,
+              ) -> None:
+    """
+    Send a `Frame` object over a zmq socket.
+    """
+
+    socket.send_string(topic, flags | zmq.SNDMORE)
+    send_array(socket, arr, flags, copy, track)
+
+
+def sub_array(socket: ZMQSocket,
+              flags: int = 0,
+              copy: bool = True,
+              track: bool = False,
+              ) -> np.ndarray:
+    """
+    Receive an ndarray over a zmq socket.
+    """
+    topic = socket.recv_string(flags)
+    md = socket.recv_json(flags)
+    buf  = memoryview(socket.recv(flags, copy, track))
+    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+
+
+def send_frame(socket: ZMQSocket,
                frame: Frame,
                flags: int = 0,
                copy: bool = True,
@@ -108,10 +165,10 @@ def send_frame(socket,
           'index': frame.index,
           'timestamp' : frame.timestamp}
     socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(frame.data, flags, copy=copy, track=track)
+    socket.send(frame.data, flags, copy, track)
 
 
-def recv_frame(socket,
+def recv_frame(socket: ZMQSocket,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
@@ -120,49 +177,63 @@ def recv_frame(socket,
     Receive a `Frame` object over a zmq socket.
     """
 
-    md = socket.recv_json(flags=flags)
-    msg  = socket.recv(flags=flags, copy=copy, track=track)
-    buf = memoryview(msg)
+    md = socket.recv_json(flags)
+    buf = memoryview(socket.recv(flags, copy, track))
     data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
+    return Frame(data, index=md['index'], timestamp=md['timestamp'])
 
 
-def pub_frame(socket,
+def pub_frame(socket: ZMQSocket,
               frame: Frame,
-              topic: str = 'frame',
+              topic: str,
               flags: int = 0,
               copy: bool = True,
               track: bool = False,
               ) -> None:
     """
-    Send a `Frame` object over a zmq socket.
+    Publish a `Frame` object.
     """
-    md = {'shape': frame.data.shape,
-          'dtype': str(frame.data.dtype),
-          'index': frame.index,
-          'timestamp' : frame.timestamp}
     socket.send_string(topic, flags | zmq.SNDMORE)
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(frame.data, flags, copy=copy, track=track)
+    send_frame(socket, frame, flags, copy, track)
 
 
-def sub_frame(socket,
+def sub_frame(socket: ZMQSocket,
               flags: int = 0,
               copy: bool = True,
               track: bool = False,
               ) -> Frame:
     """
-    Receive a `Frame` object over a zmq socket.
+    Subscribe/recv a `Frame` object.
     """
-    top = socket.recv_string(flags=flags)
-    md = socket.recv_json(flags=flags)
-    msg  = socket.recv(flags=flags, copy=copy, track=track)
-    buf = memoryview(msg)
-    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
+    topic = socket.recv_string(flags)
+    return recv_frame(socket, flags, copy, track)
 
-#-------------------------------------------------------------------#
+
+def poll_stdin(timeout: float = 0.0) -> bool:
+    """
+    Returns `True` if stdin has at least one line ready to read.
+    """
+    return select.select([sys.stdin], [], [], timeout)[0] == [sys.stdin]
+
+
+def read_stdin(timeout: float = 0.0) -> str:
+    """
+    Reads a line from stdin, if any. If no lines available, the empty
+    string is returned.
+    """
+    if select.select([sys.stdin], [], [], timeout)[0]:
+        return sys.stdin.readline()
+    return ''
+
+
+#------------------------------------------------------------------------------#
 # OS/filesystem
+
+PathLike = Union[str, pathlib.Path]
+
+def pathlike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    return isinstance(obj, (str, Path))
 
 
 # Collect info about raspbian.
@@ -174,12 +245,9 @@ if os.path.exists('/etc/os-release'):
         key, val = ln.split('=')
         _PI_INFO[key.strip()] = val.strip()
 
-
 def pi_info():
     """Infer whether this computer is a raspberry pi."""
     return _PI_INFO
-
-
 
 
 def remove(path: PathLike) -> Path:
@@ -236,7 +304,8 @@ def read_raw(path: PathLike,
     if remainder != 0:
         raise IOError("Partial frames encountered in file '{}'.".format(path))
 
-    frame_shape = [n_ypix, n_xpix] if n_channels == 1 else [n_ypix, n_xpix, n_channels]
+    frame_shape = [n_ypix, n_xpix] if n_channels == 1 else \
+                  [n_ypix, n_xpix, n_channels]
     out_shape = frame_shape if n_frames == 1 else [n_frames] + frame_shape
 
     # Handle single frame.
@@ -288,59 +357,21 @@ def write_mp4(path: PathLike, mov: np.ndarray, fps: float=30.0) -> None:
     imageio.mimwrite(str(path), mov, fps=fps)
 
 
-#-------------------------------------------------------------------#
-# OS/filesystem
-
-
-def urlparse(url: Union[PathLike, urllib.parse.ParseResult],
-             scheme: str = '',
-             ) -> urllib.parse.ParseResult:
-    """
-    Like urllib.parse.urlparse but capable of handling pathlib paths and
-    parse results.
-    """
-    if isinstance(url, urllib.parse.ParseResult):
-        url = url._replace(scheme=scheme) if scheme else url
-        return url
-
-    url = str(url) if isinstance(url, (bytes, Path)) else url
-    if not isinstance(url, str):
-        raise ValueError(f"invalid argument '{url}' for urlparse.")
-
-    res = urllib.parse.urlparse(url)
-    return res
-
-
-
-#-------------------------------------------------------------------#
-# User interaction
-
-
-def stdin_ready(timeout: float = 0.0) -> bool:
-    """
-    Determine whether stdin has at least one line available to read.
-    """
-    return select.select([sys.stdin], [], [], timeout)[0] == []
-
-
-def read_stdin(timeout: float = 0.0) -> str:
-    """
-    Reads a line from stdin, if any. If no lines available, the empty
-    string is returned.
-    """
-    if select.select([sys.stdin], [], [], timeout)[0]:
-        return sys.stdin.readline()
-    return ''
-
-
-#-------------------------------------------------------------------#
+#------------------------------------------------------------------------------#
 # etc
+
+def is_contiguous(arr: np.ndarray) -> bool:
+    return arr.flags.c_contiguous
+
+
+def as_contiguous(arr: np.ndarray) -> np.ndarray:
+    return arr if is_contiguous(arr) else np.ascontiguousarray(arr)
 
 
 def squeeze(arr: np.ndarray) -> np.ndarray:
     """
-    Call numpy.squeeze on an array only if it can be squeezed (i.e., has singleton
-    dimensions).
+    Call numpy.squeeze on an array only if it can be squeezed (i.e., has
+    singleton dimensions).
     """
     return np.squeeze(arr) if 1 in arr.shape else arr
 
@@ -355,13 +386,9 @@ def today() -> str:
 
 
 
-    
-
 def repr_secs(secs: float) -> str:
     """
     """
-
-
     sign, secs = np.sign(secs), np.abs(secs)
     if secs >= 1:
         return sign * secs, 'sec.'

@@ -14,55 +14,49 @@ HOST = 'pi-meso.local'
 class Subscriber(Thread):
 
     #: Wrapped zmq socket.
-    socket: zmq.sugar.socket.Socket
+    socket: ZMQSocket
     
     #: Socket's poller for non-blocking I/O.
-    poller: zmq.sugar.Poller
+    poller: ZMQPoller
     
     #: The queue onto which newly arrived data will be pushed onto.
     q: Queue
     
+    #: How long to wait for new data for each iteration of the event loop.
+    _timeout: float = 1.0
+    
+    #: Whether we're running the event loop.
+    _running: bool = False
     
     #: Whether to stop the thread at soonest convenience. 
     _terminate: bool = False
-    
-    #: How long to wait for new data for each iteration of the event loop.
-    
-    #: How long to sleep for when not enabled during each iteration of the 
-    #: event loop.
-    _disabled_timeout: float = 1.0
-    
-    #: Whether to call the 'report' method on data arrival.
-    _verbose: bool = False
-
     
     def __init__(self,
                  ctx,
                  host: str,
                  port: Union[int, str],
                  topic: Union[bytes, str],
-                 q: Queue,                 
-                 hwm: int = 10,
+                 recv: Callable,
+                 q: Queue,
+                 hwm: int = 1000,
                  timeout: float = 1.0,
-                 enabled: bool = True,
-                 disabled_timeout: float = 1.0,
-                 verbose: bool = False,
-                 start: bool = True,
+                 start: bool = False,
                  ):
 
         super().__init__()
 
 
         self.sock = ctx.socket(zmq.SUB)
-        self.topic = topic.encode() if isinstance(topic, str) else topic
-        self.sock.subscribe = self.topic
+        topic = topic.encode() if isinstance(topic, str) else topic
+        self.sock.subscribe = topic
         self.sock.hwm = hwm
         self.sock.connect(f'tcp://{host}:{port}')
+        
         self.poller = zmq.Poller()
         self.poller.register(self.sock, zmq.POLLIN)                
+        
         self.timeout = timeout
-        self.enabled = enabled
-        self.disabled_timeout = disabled_timeout
+
         
         self.q = q          
         self.lock = Lock()
@@ -70,16 +64,6 @@ class Subscriber(Thread):
         self._terminate = False
         if start:
             self.start()
-
-    @property
-    def enabled(self) -> bool:
-        return self._enabled
-
-    @enabled.setter
-    def enabled(self, tf: bool) -> None:
-        assert isinstance(tf, bool)
-        with self.lock:
-            self._enabled = True
 
 
     def run(self):
@@ -91,8 +75,7 @@ class Subscriber(Thread):
         
         self._terminate = False
         while not self._terminate:
-            if not self._enabled:
-                time.sleep(1)
+
             ready = dict(poller.poll(timeout * 1000))
             if sock in ready and ready[sock] == zmq.POLLIN:
                 frame = sub_frame(sock)
