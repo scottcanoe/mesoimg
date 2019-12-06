@@ -4,48 +4,10 @@ from glumpy import app, gloo, gl, glm
 import numpy as np
 import zmq
 from mesoimg.common import *
+from mesoimg.inputs import FrameSubscriber
 
 
 
-
-
-
-class FrameReceiver(Thread):
-    
-    """
-    Receives frames from frame socket. Only stores 1-most recent.
-    
-    """
-    
-    def __init__(self, sock):
-        super().__init__()
-        self.sock = sock
-        self.data = None
-        self.n_received = 0
-        self.terminate = False
-
-    
-    def run(self):
-
-        global frame, frame_base, n_received
-
-        while True:
-            with lock:
-                if self.terminate:
-                    break
-
-            fm = recv_frame(self.sock)
-            with lock:
-                frame_base = fm
-                data = fm.data
-                pmin, pmax = np.percentile(data, [0.5, 99.5])
-                print(f'99.5 percentile: {pmax}')
-                frame[:, :, 0] = data
-                frame[:, :, 1] = data
-                frame[:, :, 2] = data
-                n_received += 1
-                self.data = data
-                self.n_received += 1
 
                 
 
@@ -83,11 +45,11 @@ sock.connect(f'tcp://127.0.0.1:{PREVIEW_PORT}')
 frame_receiver = FrameReceiver(sock)
 frame_receiver.start()
 
-window = app.Window(width=640, height=480, aspect=1)
+win = app.Window(width=480, height=480, aspect=1)
 
-@window.event
+@win.event
 def on_draw(dt):
-    window.clear()
+    win.clear()
     quad['texture'] = frame
     quad.draw(gl.GL_TRIANGLE_STRIP)
 

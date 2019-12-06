@@ -353,7 +353,11 @@ def today() -> str:
     return f'{d.tm_year}-{d.tm_mon:02}-{d.tm_mday:02}'
 
 
-def repr_secs(secs):
+
+
+    
+
+def repr_secs(secs: float) -> str:
     """
     """
 
