@@ -102,9 +102,6 @@ class Camera:
         self._state = 'waiting'
 
 
-
-
-
     #-----------------------------------------------------------#
     # Main camera settings
 
