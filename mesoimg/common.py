@@ -1,14 +1,11 @@
-from collections import namedtuple
 from enum import IntEnum
 import json
-import logging
 import os
 import pathlib
 from pathlib import Path
 from pprint import PrettyPrinter
 import select
 import sys
-from threading import Event
 import time
 from typing import (Any,
                     Callable,
@@ -16,7 +13,6 @@ from typing import (Any,
                     Tuple,
                     Union,
                     )
-import urllib.parse
 import h5py
 import numpy as np
 import zmq
@@ -24,17 +20,23 @@ import zmq
 
 __all__ = [
 
+    # Frames
+    'Frame',
+
     # Networking
     'Ports',
-    'Frame',
+    'send_bytes',
+    'recv_bytes',
+    'send_json',
+    'recv_json',
+    'send_string',
+    'recv_string',
+    'send_pyobj',
+    'recv_pyobj',
     'send_array',
     'recv_array',
-    'pub_array',
-    'sub_array',
     'send_frame',
     'recv_frame',
-    'pub_frame',
-    'sub_frame',
     'poll_stdin',
     'read_stdin',
 
@@ -65,16 +67,7 @@ __all__ = [
 
 
 #------------------------------------------------------------------------------#
-# Networking
-
-
-class Ports(IntEnum):
-    """
-    Enum for holding port numbers.
-    """
-    COMMAND    = 7000
-    FRAME_PUB  = 7001
-    STATUS_PUB = 7002
+# Frames
 
 
 class Frame(NamedTuple):
@@ -87,8 +80,8 @@ class Frame(NamedTuple):
     timestamp: float
 
 
-def send_array(socket: zmq.Socket,
-               arr: np.ndarray,
+def send_frame(socket: zmq.Socket,
+               data: Frame,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
@@ -96,9 +89,111 @@ def send_array(socket: zmq.Socket,
     """
     Send a `Frame` object over a zmq socket.
     """
-    md = {'shape' : arr.shape, 'dtype' : str(arr.dtype)}
+    md = {'shape': data.data.shape,
+          'dtype': str(data.data.dtype),
+          'index': data.index,
+          'timestamp' : data.timestamp}
     socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(arr, flags, copy, track)
+    socket.send(data.data, flags, copy, track)
+
+
+def recv_frame(socket: zmq.Socket,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> Frame:
+    """
+    Receive a `Frame` object over a zmq socket.
+    """
+
+    md = socket.recv_json(flags)
+    buf = memoryview(socket.recv(flags, copy, track))
+    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+    return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
+
+
+#------------------------------------------------------------------------------#
+# Networking
+
+
+class Ports(IntEnum):
+    """
+    Enum for holding port numbers.
+    """
+    COMMAND    = 7000
+    FRAME_PUB  = 7001
+    STATUS_PUB = 7002
+
+
+def send_bytes(socket: zmq.Socket, data: bytes, **kw) -> None:
+    """
+    Send bytes.
+    """
+    socket.send(data, **kw)
+
+
+def recv_bytes(socket: zmq.Socket, **kw) -> bytes:
+    """
+    Receive bytes.
+    """
+    return socket.recv(**kw)
+
+
+def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
+    """
+    Send a dictionary.
+    """
+    socket.send_json(data, **kw)
+
+
+def recv_json(socket: zmq.Socket, **kw) -> Dict:
+    """
+    Receive a dictionary.
+    """
+    return socket.recv_json(**kw)
+
+
+def send_string(socket: zmq.Socket, data: str, **kw) -> None:
+    """
+    Send a string.
+    """
+    socket.send_string(data, **kw)
+
+
+def recv_string(socket: zmq.Socket, **kw) -> str:
+    """
+    Receive a string.
+    """
+    return socket.recv_string(**kw)
+
+
+def send_pyobj(socket: zmq.Socket, data: Any, **kw) -> None:
+    """
+    Send python object.
+    """
+    socket.send_pyobj(data, **kw)
+
+
+def recv_pyobj(socket: zmq.Socket, **kw) -> Any:
+    """
+    Receive python object.
+    """
+    return socket.recv_pyobj(**kw)
+
+
+def send_array(socket: zmq.Socket,
+               data: np.ndarray,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
+    """
+    Send a ndarray.
+    """
+
+    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(data, flags, copy, track)
 
 
 def recv_array(socket: zmq.Socket,
@@ -114,91 +209,7 @@ def recv_array(socket: zmq.Socket,
     return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
 
-def pub_array(socket: zmq.Socket,
-              arr: np.ndarray,
-              topic: str,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> None:
-    """
-    Send a `Frame` object over a zmq socket.
-    """
 
-    socket.send_string(topic, flags | zmq.SNDMORE)
-    send_array(socket, arr, flags, copy, track)
-
-
-def sub_array(socket: zmq.Socket,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> np.ndarray:
-    """
-    Receive an ndarray over a zmq socket.
-    """
-    topic = socket.recv_string(flags)
-    md = socket.recv_json(flags)
-    buf  = memoryview(socket.recv(flags, copy, track))
-    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-
-
-def send_frame(socket: zmq.Socket,
-               frame: Frame,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> None:
-    """
-    Send a `Frame` object over a zmq socket.
-    """
-    md = {'shape': frame.data.shape,
-          'dtype': str(frame.data.dtype),
-          'index': frame.index,
-          'timestamp' : frame.timestamp}
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(frame.data, flags, copy, track)
-
-
-def recv_frame(socket: zmq.Socket,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> Frame:
-    """
-    Receive a `Frame` object over a zmq socket.
-    """
-
-    md = socket.recv_json(flags)
-    buf = memoryview(socket.recv(flags, copy, track))
-    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data, index=md['index'], timestamp=md['timestamp'])
-
-
-def pub_frame(socket: zmq.Socket,
-              frame: Frame,
-              topic: str,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> None:
-    """
-    Publish a `Frame` object.
-    """
-    socket.send_string(topic, flags | zmq.SNDMORE)
-    send_frame(socket, frame, flags, copy, track)
-
-
-def sub_frame(socket: zmq.Socket,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> Frame:
-    """
-    Subscribe/recv a `Frame` object.
-    """
-    topic = socket.recv_string(flags)
-    return recv_frame(socket, flags, copy, track)
 
 
 def poll_stdin(timeout: float = 0.0) -> bool:
@@ -351,6 +362,7 @@ def write_mp4(path: PathLike, mov: np.ndarray, fps: float=30.0) -> None:
 
 #------------------------------------------------------------------------------#
 # etc
+
 
 def is_contiguous(arr: np.ndarray) -> bool:
     return arr.flags.c_contiguous
