@@ -20,14 +20,20 @@ class MesoServer:
     _terminate: bool = False
 
 
-    def __init__(self):
+    def __init__(self,
+                 context: Optional[zmq.Context] = None,
+                 start: bool = False,
+                 ):
 
         print('Initializing MesoServer.')
+
+        if context is None:
+            ctx = zmq.Context.instance()
 
         self.sockets = {}
         self.threads = {}
 
-        self.ctx = zmq.Context()
+        self.ctx = ctx
         self.cmd_sock = self.ctx.socket(zmq.REP)
         self.cmd_sock.bind(f'tcp://*:{Ports.COMMAND}')
         self.cmd_poller = zmq.Poller()

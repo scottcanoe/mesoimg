@@ -2,21 +2,25 @@ from collections import namedtuple
 from enum import IntEnum
 import json
 import logging
+import multiprocessing
 import os
 import pathlib
 from pathlib import Path
 from pprint import PrettyPrinter
 import select
 import sys
-from threading import Event
+import threading
 import time
 from typing import (Any,
                     Callable,
+                    Dict,
+                    List,
                     NamedTuple,
+                    Optional,
                     Tuple,
                     Union,
                     )
-import urllib.parse
+import queue
 import h5py
 import numpy as np
 import zmq
@@ -27,16 +31,25 @@ __all__ = [
     # Networking
     'Ports',
     'Frame',
+    'send_bytes',
+    'recv_bytes',
+    'send_json',
+    'recv_json',
+    'send_string',
+    'recv_string',
+    'send_pyobj',
+    'recv_pyobj',
     'send_array',
     'recv_array',
-    'pub_array',
-    'sub_array',
     'send_frame',
     'recv_frame',
-    'pub_frame',
-    'sub_frame',
     'poll_stdin',
     'read_stdin',
+
+    # Threading, multiprocessing, etc.
+    'clear_queue',
+    'push_queue',
+    'read_queue',
 
     # Filesystem and data I/O.
     'PathLike',
@@ -87,18 +100,75 @@ class Frame(NamedTuple):
     timestamp: float
 
 
+def send_bytes(socket: zmq.Socket, data: bytes, **kw) -> None:
+    """
+    Send bytes.
+    """
+    socket.send(data, **kw)
+
+
+def recv_bytes(socket: zmq.Socket, **kw) -> bytes:
+    """
+    Receive bytes.
+    """
+    return socket.recv(**kw)
+
+
+def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
+    """
+    Send a dictionary.
+    """
+    socket.send_json(data, **kw)
+
+
+def recv_json(socket: zmq.Socket, **kw) -> Dict:
+    """
+    Receive a dictionary.
+    """
+    return socket.recv_json(**kw)
+
+
+def send_string(socket: zmq.Socket, data: str, **kw) -> None:
+    """
+    Send a string.
+    """
+    socket.send_string(data, **kw)
+
+
+def recv_string(socket: zmq.Socket, **kw) -> str:
+    """
+    Receive a string.
+    """
+    return socket.recv_string(**kw)
+
+
+def send_pyobj(socket: zmq.Socket, data: Any, **kw) -> None:
+    """
+    Send python object.
+    """
+    socket.send_pyobj(data, **kw)
+
+
+def recv_pyobj(socket: zmq.Socket, **kw) -> Any:
+    """
+    Receive python object.
+    """
+    return socket.recv_pyobj(**kw)
+
+
 def send_array(socket: zmq.Socket,
-               arr: np.ndarray,
+               data: np.ndarray,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
                ) -> None:
     """
-    Send a `Frame` object over a zmq socket.
+    Send a ndarray.
     """
-    md = {'shape' : arr.shape, 'dtype' : str(arr.dtype)}
+
+    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
     socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(arr, flags, copy, track)
+    socket.send(data, flags, copy, track)
 
 
 def recv_array(socket: zmq.Socket,
@@ -114,37 +184,8 @@ def recv_array(socket: zmq.Socket,
     return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
 
-def pub_array(socket: zmq.Socket,
-              arr: np.ndarray,
-              topic: str,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> None:
-    """
-    Send a `Frame` object over a zmq socket.
-    """
-
-    socket.send_string(topic, flags | zmq.SNDMORE)
-    send_array(socket, arr, flags, copy, track)
-
-
-def sub_array(socket: zmq.Socket,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> np.ndarray:
-    """
-    Receive an ndarray over a zmq socket.
-    """
-    topic = socket.recv_string(flags)
-    md = socket.recv_json(flags)
-    buf  = memoryview(socket.recv(flags, copy, track))
-    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-
-
 def send_frame(socket: zmq.Socket,
-               frame: Frame,
+               data: Frame,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
@@ -152,12 +193,12 @@ def send_frame(socket: zmq.Socket,
     """
     Send a `Frame` object over a zmq socket.
     """
-    md = {'shape': frame.data.shape,
-          'dtype': str(frame.data.dtype),
-          'index': frame.index,
-          'timestamp' : frame.timestamp}
+    md = {'shape': data.data.shape,
+          'dtype': str(data.data.dtype),
+          'index': data.index,
+          'timestamp' : data.timestamp}
     socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(frame.data, flags, copy, track)
+    socket.send(data.data, flags, copy, track)
 
 
 def recv_frame(socket: zmq.Socket,
@@ -172,33 +213,7 @@ def recv_frame(socket: zmq.Socket,
     md = socket.recv_json(flags)
     buf = memoryview(socket.recv(flags, copy, track))
     data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data, index=md['index'], timestamp=md['timestamp'])
-
-
-def pub_frame(socket: zmq.Socket,
-              frame: Frame,
-              topic: str,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> None:
-    """
-    Publish a `Frame` object.
-    """
-    socket.send_string(topic, flags | zmq.SNDMORE)
-    send_frame(socket, frame, flags, copy, track)
-
-
-def sub_frame(socket: zmq.Socket,
-              flags: int = 0,
-              copy: bool = True,
-              track: bool = False,
-              ) -> Frame:
-    """
-    Subscribe/recv a `Frame` object.
-    """
-    topic = socket.recv_string(flags)
-    return recv_frame(socket, flags, copy, track)
+    return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
 
 
 def poll_stdin(timeout: float = 0.0) -> bool:
@@ -216,6 +231,49 @@ def read_stdin(timeout: float = 0.0) -> str:
     if select.select([sys.stdin], [], [], timeout)[0]:
         return sys.stdin.readline()
     return ''
+
+
+#------------------------------------------------------------------------------#
+# Threading, multiprocesing, etc.
+
+
+
+def clear_queue(q: queue.Queue) -> None:
+    """
+    Empty a queue.
+    """
+    while not q.empty():
+        q.get()
+
+
+def push_queue(q: queue.Queue, elt: Any) -> None:
+    """
+    Like Queue.put(), but will pop an element prior to put if
+    queue is full.
+    """
+    if q.full():
+        q.get()
+    q.put(elt)
+
+
+def read_queue(q: queue.Queue, replace: bool = False) -> List:
+    """
+    Read a queue's contents by popping its elements until empty.
+    If ``replace``  is ``True``, the elements will be pushed back
+    onto the queue prior to returning.
+    """
+
+    # Pop the elements into a list.
+    lst = []
+    while not q.empty():
+        lst.append(q.get())
+
+    # Optionally put the elements back into the queue.
+    if replace:
+        for i, elt in enumerate(lst):
+            q.put(elt)
+
+    return lst
 
 
 #------------------------------------------------------------------------------#
