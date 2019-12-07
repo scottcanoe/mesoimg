@@ -11,6 +11,7 @@ import time
 from typing import (Any,
                     Callable,
                     Dict,
+                    List,
                     NamedTuple,
                     Tuple,
                     Union,
@@ -44,7 +45,7 @@ __all__ = [
 
     # Threading, multiprocessing, etc.
     'clear_q',
-    'push_q',
+    'put_q',
     'read_q',
 
     # Filesystem and data I/O.
@@ -107,6 +108,8 @@ class Ports(IntEnum):
     COMMAND    = 7000
     FRAME_PUB  = 7001
     STATUS_PUB = 7002
+
+
 
 
 def send_array(socket: zmq.Socket,
