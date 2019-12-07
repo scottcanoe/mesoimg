@@ -16,6 +16,7 @@ from typing import (Any,
                     Union,
                     )
 import h5py
+import imageio
 import numpy as np
 import zmq
 
@@ -54,11 +55,17 @@ __all__ = [
     'write_json',
     'read_text',
     'write_text',
-    'read_raw',
     'read_h264',
     'read_h5',
     'write_h5',
+    'read_jpeg',
+    'write_jpeg',
+    'read_mp4',
     'write_mp4',
+    'read_raw',
+    'write_raw',
+    'get_reader',
+    'get_writer',
 
     # etc.
     'pi_info',
@@ -306,6 +313,52 @@ def write_text(path: PathLike, text: str) -> None:
     with open(path, 'w') as f:
         f.write(text)
 
+def iterframes_h264(path) -> np.ndarray:
+    import cv2
+    cap = cv2.VideoCapture(str(path))
+    try:
+        while cap.isOpened():
+            ret, im = cap.read()
+            if not ret:
+                break
+            im = im[:, :, (2, 1 , 0)]
+            yield im
+
+    finally:
+        cap.release()
+
+
+def read_h264(path: PathLike) -> np.ndarray:
+    return np.array(list(iterframes_h264(path)))
+
+
+def read_h5(path: PathLike) -> np.ndarray:
+    with h5py.File(str(path), 'r') as f:
+        dset = f['data']
+        mov = dset[:]
+    return mov
+
+
+def write_h5(path: PathLike, data: np.ndarray) -> None:
+    with h5py.File(str(path), 'w') as f:
+        dset = f.create_dataset('data', data=data)
+
+
+def read_jpeg(path: PathLike) -> np.ndarray:
+    return imageio.imread(path)
+
+def write_jpeg(path: PathLike, data: np.ndarray) -> None:
+    return imageio.imwrite(path, data)
+
+
+def read_mp4(path: PathLike):
+    return imageio.mimread(path)
+
+
+def write_mp4(path: PathLike, data: np.ndarray, fps: float = 30.0) -> None:
+    fps = kw.get('fps', 30)
+    imageio.mimwrite(str(path), mov, fps=fps)
+
 
 def read_raw(path: PathLike,
              resolution: Tuple[int, int] = (480, 480),
@@ -345,42 +398,37 @@ def read_raw(path: PathLike,
     return mov
 
 
-def iterframes_h264(path) -> np.ndarray:
-    import cv2
-    cap = cv2.VideoCapture(str(path))
-    try:
-        while cap.isOpened():
-            ret, im = cap.read()
-            if not ret:
-                break
-            im = im[:, :, (2, 1 , 0)]
-            yield im
-
-    finally:
-        cap.release()
+def write_raw(path: PathLike, data: np.ndarray) -> None:
+    with open(path, 'wb') as f:
+        data.tofile(f)
 
 
-def read_h264(path: PathLike) -> np.ndarray:
-    return np.array(list(iterframes_h264(path)))
+def get_reader(path: PathLike, *args, **kw) -> Callable:
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext == 'h5':
+        return read_h5
+    if ext in ('jpeg', 'jpg'):
+        return read_jpeg
+    if ext == 'mp4':
+        return read_mp4
+    if ext == 'raw':
+        return read_raw
+    raise ValueError(f'No reader for file: {path}')
 
 
-def read_h5(path: PathLike) -> np.ndarray:
-
-    with h5py.File(str(path), 'r') as f:
-        dset = f['data']
-        mov = dset[:]
-    return mov
-
-def write_h5(path: PathLike, arr: np.ndarray) -> None:
-
-    with h5py.File(str(path), 'w') as f:
-        dset = f.create_dataset('data', data=arr)
-
-
-def write_mp4(path: PathLike, mov: np.ndarray, fps: float=30.0) -> None:
-    import imageio
-    imageio.mimwrite(str(path), mov, fps=fps)
-
+def get_writer(path: PathLike, *args, **kw) -> Callable:
+    p = Path(path)
+    ext = p.suffix.lower()
+    if ext == 'h5':
+        return write_h5
+    if ext in ('jpeg', 'jpg'):
+        return write_jpeg
+    if ext == 'mp4':
+        return write_mp4
+    if ext == 'raw':
+        return write_raw
+    raise ValueError(f'No writer for file: {path}')
 
 #------------------------------------------------------------------------------#
 # etc
@@ -447,3 +495,11 @@ def pprint(obj: Any) -> None:
 
 def pformat(obj: Any) -> str:
     return _printer.pformat(obj)
+
+
+def validate_channels(ch: str) -> str:
+
+    if ch.lower() not in ('r', 'g', 'b', 'rgb'):
+        raise ValueError(f"invalid channel spec '{ch}'")
+    return ch.lower()
+

@@ -1,4 +1,5 @@
 import io
+from typing import Tuple
 import numpy as np
 from picamera.array import raw_resolution
 
@@ -81,7 +82,7 @@ class FrameBuffer(io.BytesIO):
         data = np.frombuffer(self.getvalue(), dtype=np.uint8)
         data = data.reshape(self._in_shape)[self._out_slice]
         data = as_contiguous(data)
-        self._cam._frame_buffer_callback(data)
+        self._cam._frame_callback(data)
 
         # Finally, rewind the buffer and return as usual.
         self.truncate(0)

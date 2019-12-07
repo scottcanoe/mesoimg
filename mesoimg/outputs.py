@@ -16,8 +16,6 @@ __all__ = [
 
 
 
-
-
 class DataSender(Thread):
 
     """

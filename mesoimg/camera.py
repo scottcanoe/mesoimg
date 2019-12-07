@@ -65,6 +65,10 @@ _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
 
 
 
+
+
+
+
 class Camera:
 
 
@@ -75,23 +79,31 @@ class Camera:
         # Initialize wrapped picamera. Sets `_cam` attribute.
         self._init_cam()
 
-        # Initialize frame attributes.
+        # Basic attributes.
+        self.lock = Lock()
+        self._capturing = False
+        self._streaming = False
+
+        # Frame attributes.
         self.frame_lock = Lock()
         self._frame = None
         self._frame_counter = 0
         self._frame_clock = Clock()
 
         # Still capture attributes.
-        self.still_lock = Lock()
-        self._still_info = {}
+        self.capture_lock = Lock()
+        self._capture_info = {}
 
         # Streaming attributes.
         self.streaming_lock = Lock()
         self._streaming_info = {}
 
-        # Threading and synchronization.
-        self.frame_q = queue.Queue(maxsize=10)
+
+        # Threading and synchronization
+        self.frame_q = queue.Queue(maxsize=30)
         self.new_frame = Condition()
+
+
 
 
     #--------------------------------------------------------------------------#
@@ -105,6 +117,8 @@ class Camera:
 
     @resolution.setter
     def resolution(self, res: Tuple[int, int]) -> None:
+        if self._streaming:
+            raise RuntimeError('cannot change resolution while streaming.')
         self._cam.resolution = res
 
     @property
@@ -113,9 +127,9 @@ class Camera:
 
     @channels.setter
     def channels(self, c: str) -> None:
-        if c not in ('r', 'g', 'b', 'rgb'):
-            raise ValueError(f"invalid channels '{ch}'")
-        self._channels = c
+        if self._streaming:
+            raise RuntimeError('cannot change channels while streaming.')
+        self._channels = validate_channels(c)
 
     @property
     def framerate(self) -> float:
@@ -131,6 +145,8 @@ class Camera:
 
     @sensor_mode.setter
     def sensor_mode(self, mode: int) -> None:
+        if self._streaming:
+            raise RuntimeError('cannot change channels while streaming.')
         self._cam.sensor_mode = mode
 
     @property
@@ -204,6 +220,14 @@ class Camera:
 
 
     @property
+    def capturing(self) -> bool:
+        return self._capturing
+
+    @property
+    def streaming(self) -> bool:
+        return self._streaming
+
+    @property
     def frame(self):
         return self._frame
 
@@ -251,7 +275,7 @@ class Camera:
 
     def clear(self) -> None:
         self.clear_frame_attrs()
-        self.clear_still_attrs()
+        self.clear_capture_attrs()
         self.clear_streaming_attrs()
 
 
@@ -266,9 +290,9 @@ class Camera:
             clear_queue(self.frame_queue)
 
 
-    def clear_still_attrs(self) -> None:
-        with self.still_lock:
-            self._still_info = {}
+    def clear_capture_attrs(self) -> None:
+        with self.capture_lock:
+            self._capture_info = {}
 
 
     def clear_streaming_attrs(self) -> None:
@@ -284,8 +308,22 @@ class Camera:
 
     # Recording/previewing
     def capture(self, out: Optional[PathLike] = None) -> None:
+
         self.clear_frame_attrs()
-        self.clear_still_attrs()
+        self.clear_capture_attrs()
+
+        with self.lock:
+            self._capturing = True
+        buf = FrameBuffer(self)
+        self._cam.capture(buf, 'rgb')
+        with self.lock:
+            self._capturing = True
+
+        if out:
+            with self.frame_lock:
+                data = self.frame.data
+            fn = get_writer(out)
+            fn(out, data)
 
 
     def start_streaming(self) -> None:
@@ -304,6 +342,14 @@ class Camera:
         time.sleep(0.1)
 
 
+    def stream_for(self, duration: float) -> None:
+        self.start_streaming()
+        self.wait_streaming()
+
+
+    def stream_until(self, event: Any) -> None:
+        pass
+
 
     #-------------------------------------------------------------------------#
     # Private/protected methods
@@ -321,11 +367,7 @@ class Camera:
                 setattr(self, key, val)
 
 
-
     def _frame_callback(self, data: np.ndarray) -> None:
-        pass
-
-    def _recording_callback(self, data: np.ndarray) -> None:
 
         """
         Called by the frame buffer upon new frame being written.
