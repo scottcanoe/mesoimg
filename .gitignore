@@ -2,6 +2,9 @@
 # Local files
 local/
 
+# Log files
+logs/
+
 # Wing files
 *.wpr
 *.wpu
@@ -51,4 +54,7 @@ ipython_config.py
 # Temporary files
 tmp/
 .mypy_cache/
+
+
+
 
