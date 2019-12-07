@@ -4,11 +4,13 @@ import os
 import pathlib
 from pathlib import Path
 from pprint import PrettyPrinter
+import queue
 import select
 import sys
 import time
 from typing import (Any,
                     Callable,
+                    Dict,
                     NamedTuple,
                     Tuple,
                     Union,
@@ -20,31 +22,34 @@ import zmq
 
 __all__ = [
 
-    # Frames
+    # Shares classes and constants.
     'Frame',
+    'PathLike',
 
     # Networking
     'Ports',
-    'send_bytes',
-    'recv_bytes',
-    'send_json',
-    'recv_json',
-    'send_string',
-    'recv_string',
-    'send_pyobj',
-    'recv_pyobj',
     'send_array',
     'recv_array',
+    'send_bytes',
+    'recv_bytes',
     'send_frame',
     'recv_frame',
-    'poll_stdin',
-    'read_stdin',
+    'send_json',
+    'recv_json',
+    'send_pyobj',
+    'recv_pyobj',
+    'send_string',
+    'recv_string',
+
+    # Threading, multiprocessing, etc.
+    'clear_q',
+    'push_q',
+    'read_q',
 
     # Filesystem and data I/O.
-    'PathLike',
     'pathlike',
-    'pi_info',
-    'remove',
+    'poll_stdin',
+    'read_stdin',
     'read_json',
     'write_json',
     'read_text',
@@ -56,6 +61,7 @@ __all__ = [
     'write_mp4',
 
     # etc.
+    'pi_info',
     'is_contiguous',
     'as_contiguous',
     'squeeze',
@@ -67,7 +73,10 @@ __all__ = [
 
 
 #------------------------------------------------------------------------------#
-# Frames
+# Shares classes and constants
+
+
+PathLike = Union[str, pathlib.Path]
 
 
 class Frame(NamedTuple):
@@ -78,6 +87,61 @@ class Frame(NamedTuple):
     data: np.ndarray
     index: int
     timestamp: float
+
+
+#------------------------------------------------------------------------------#
+# Networking
+
+
+class Ports(IntEnum):
+    """
+    Enum for holding port numbers.
+    """
+    COMMAND    = 7000
+    FRAME_PUB  = 7001
+    STATUS_PUB = 7002
+
+
+def send_array(socket: zmq.Socket,
+               data: np.ndarray,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> None:
+    """
+    Send a ndarray.
+    """
+
+    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(data, flags, copy, track)
+
+
+def recv_array(socket: zmq.Socket,
+               flags: int = 0,
+               copy: bool = True,
+               track: bool = False,
+               ) -> np.ndarray:
+    """
+    Receive an ndarray over a zmq socket.
+    """
+    md = socket.recv_json(flags)
+    buf  = memoryview(socket.recv(flags, copy, track))
+    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+
+
+def send_bytes(socket: zmq.Socket, data: bytes, **kw) -> None:
+    """
+    Send bytes.
+    """
+    socket.send(data, **kw)
+
+
+def recv_bytes(socket: zmq.Socket, **kw) -> bytes:
+    """
+    Receive bytes.
+    """
+    return socket.recv(**kw)
 
 
 def send_frame(socket: zmq.Socket,
@@ -112,33 +176,6 @@ def recv_frame(socket: zmq.Socket,
     return Frame(data=data, index=md['index'], timestamp=md['timestamp'])
 
 
-#------------------------------------------------------------------------------#
-# Networking
-
-
-class Ports(IntEnum):
-    """
-    Enum for holding port numbers.
-    """
-    COMMAND    = 7000
-    FRAME_PUB  = 7001
-    STATUS_PUB = 7002
-
-
-def send_bytes(socket: zmq.Socket, data: bytes, **kw) -> None:
-    """
-    Send bytes.
-    """
-    socket.send(data, **kw)
-
-
-def recv_bytes(socket: zmq.Socket, **kw) -> bytes:
-    """
-    Receive bytes.
-    """
-    return socket.recv(**kw)
-
-
 def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
     """
     Send a dictionary.
@@ -151,20 +188,6 @@ def recv_json(socket: zmq.Socket, **kw) -> Dict:
     Receive a dictionary.
     """
     return socket.recv_json(**kw)
-
-
-def send_string(socket: zmq.Socket, data: str, **kw) -> None:
-    """
-    Send a string.
-    """
-    socket.send_string(data, **kw)
-
-
-def recv_string(socket: zmq.Socket, **kw) -> str:
-    """
-    Receive a string.
-    """
-    return socket.recv_string(**kw)
 
 
 def send_pyobj(socket: zmq.Socket, data: Any, **kw) -> None:
@@ -181,36 +204,69 @@ def recv_pyobj(socket: zmq.Socket, **kw) -> Any:
     return socket.recv_pyobj(**kw)
 
 
-def send_array(socket: zmq.Socket,
-               data: np.ndarray,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> None:
+def send_string(socket: zmq.Socket, data: str, **kw) -> None:
     """
-    Send a ndarray.
+    Send a string.
+    """
+    socket.send_string(data, **kw)
+
+
+def recv_string(socket: zmq.Socket, **kw) -> str:
+    """
+    Receive a string.
+    """
+    return socket.recv_string(**kw)
+
+
+#------------------------------------------------------------------------------#
+# Threading, multiprocesing, etc.
+
+
+def clear_q(q: queue.Queue) -> None:
+    """
+    Empty a queue.
+    """
+    while not q.empty():
+        q.get()
+
+
+def put_q(q: queue.Queue, elt: Any) -> None:
+    """
+    Like Queue.put(), but will pop an element prior to put if
+    queue is full.
+    """
+    if q.full():
+        q.get()
+    q.put(elt)
+
+
+def read_q(q: queue.Queue, replace: bool = False) -> List:
+    """
+    Read a queue's contents by popping its elements until empty.
+    If ``replace``  is ``True``, the elements will be pushed back
+    onto the queue prior to returning.
     """
 
-    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(data, flags, copy, track)
+    # Pop the elements into a list.
+    lst = []
+    while not q.empty():
+        lst.append(q.get())
+
+    # Optionally put the elements back into the queue.
+    if replace:
+        for i, elt in enumerate(lst):
+            q.put(elt)
+
+    return lst
 
 
-def recv_array(socket: zmq.Socket,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> np.ndarray:
-    """
-    Receive an ndarray over a zmq socket.
-    """
-    md = socket.recv_json(flags)
-    buf  = memoryview(socket.recv(flags, copy, track))
-    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+#------------------------------------------------------------------------------#
+# OS/filesystem
 
 
-
-
+def pathlike(obj: Any) -> bool:
+    """Determine whether an object is interpretable as a filesystem path."""
+    return isinstance(obj, (str, Path))
 
 def poll_stdin(timeout: float = 0.0) -> bool:
     """
@@ -228,40 +284,6 @@ def read_stdin(timeout: float = 0.0) -> str:
         return sys.stdin.readline()
     return ''
 
-
-#------------------------------------------------------------------------------#
-# OS/filesystem
-
-PathLike = Union[str, pathlib.Path]
-
-def pathlike(obj: Any) -> bool:
-    """Determine whether an object is interpretable as a filesystem path."""
-    return isinstance(obj, (str, Path))
-
-
-# Collect info about raspbian.
-if os.path.exists('/etc/os-release'):
-    with open('/etc/os-release', 'r') as f:
-        lines = f.readlines()
-    _PI_INFO = {}
-    for ln in lines:
-        key, val = ln.split('=')
-        _PI_INFO[key.strip()] = val.strip()
-
-def pi_info():
-    """Infer whether this computer is a raspberry pi."""
-    return _PI_INFO
-
-
-def remove(path: PathLike) -> Path:
-    """
-    Equivalent to os.remove without raising an error if the file does
-    not exist.
-    """
-    path = Path(path)
-    if path.exists():
-        path.unlink()
-    return path
 
 
 
@@ -363,6 +385,19 @@ def write_mp4(path: PathLike, mov: np.ndarray, fps: float=30.0) -> None:
 #------------------------------------------------------------------------------#
 # etc
 
+_pi_info = {}
+if os.path.exists('/etc/os-release'):
+    with open('/etc/os-release', 'r') as f:
+        lines = f.readlines()
+    for ln in lines:
+        key, val = ln.split('=')
+        _pi_info[key.strip()] = val.strip()
+
+def pi_info():
+    """Infer whether this computer is a raspberry pi."""
+    # Collect info about raspbian.
+    return _pi_info.copy()
+
 
 def is_contiguous(arr: np.ndarray) -> bool:
     return arr.flags.c_contiguous
@@ -389,7 +424,6 @@ def today() -> str:
 
 
 
-
 def repr_secs(secs: float) -> str:
     """
     """
@@ -405,11 +439,11 @@ def repr_secs(secs: float) -> str:
 
 
 
-printer = PrettyPrinter()
+_printer = PrettyPrinter()
 
 def pprint(obj: Any) -> None:
-    printer.pprint(obj)
+    _printer.pprint(obj)
 
 
 def pformat(obj: Any) -> str:
-    return printer.pformat(obj)
+    return _printer.pformat(obj)

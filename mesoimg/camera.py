@@ -16,9 +16,9 @@ from typing import (Any,
                     Union)
 import queue
 import numpy as np
+from picamera import PiCamera
 import zmq
-
-import picamera
+from mesoimg.buffers import *
 from mesoimg.common import *
 from mesoimg.timing import *
 from mesoimg.outputs import *
@@ -47,7 +47,6 @@ _DEFAULTS: ClassVar[Dict[str, Any]] = {\
 
 
 _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
-    'state',
     'resolution',
     'channels',
     'framerate',
@@ -69,18 +68,6 @@ _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
 class Camera:
 
 
-    #: Wrapped PiCamera instance. Gets set in ``Camera.init_cam``
-    _cam: Optional[picamera.PiCamera]
-
-
-    #: Index of current frame being captured.
-    _frame_counter: int
-
-    #: Most recent frame captured.
-    _frame: Optional[Frame]
-
-    #: Clock used for timestamps.
-    _frame_clock:
 
 
     def __init__(self, **config):
@@ -88,20 +75,28 @@ class Camera:
         # Initialize wrapped picamera. Sets `_cam` attribute.
         self._init_cam()
 
-        # Initialize frame attributes protected with a lock.
+        # Initialize frame attributes.
         self.frame_lock = Lock()
         self._frame = None
         self._frame_counter = 0
         self._frame_clock = Clock()
-        self._frame_buffer = None
 
-        # Initialize threading primitives for communicating frame data.
+        # Still capture attributes.
+        self.still_lock = Lock()
+        self._still_info = {}
+
+        # Streaming attributes.
+        self.streaming_lock = Lock()
+        self._streaming_info = {}
+
+        # Threading and synchronization.
         self.frame_q = queue.Queue(maxsize=10)
         self.new_frame = Condition()
 
 
     #--------------------------------------------------------------------------#
     # Main camera settings.
+
 
     @property
     def resolution(self) -> Tuple[int, int]:
@@ -203,18 +198,14 @@ class Camera:
     def closed(self):
         return self._cam.closed
 
-    @property
-    def status(self) -> Dict[str, Any]:
-        return {name : getattr(self, name) for name in STATUS_ATTRS}
 
     #--------------------------------------------------------------------------#
-    # etc. properties
+    # various properties
 
 
     @property
-    def state(self):
-        return self._state
-
+    def frame(self):
+        return self._frame
 
     @property
     def out_shape(self) -> Tuple:
@@ -229,138 +220,112 @@ class Camera:
             return (n_ypix, n_xpix, n_channels)
         return (n_ypix, n_xpix)
 
+    @property
+    def status(self) -> Dict[str, Any]:
+        return {name : getattr(self, name) for name in STATUS_ATTRS}
+
 
     #--------------------------------------------------------------------------#
+    # Public methods
+
+
     # Bulk attribute getting/setting
 
     def getattrs(self, keys: Iterable[str]) -> List:
         return [getattr(self, name) for name in keys]
 
 
+    def setattrs(self, items: Dict[str, Any]) -> None:
+        for key, val in items.items():
+            setattr(self, key, val)
 
-    #--------------------------------------------------------------------------#
+
     # Opening/closing/reopening/resetting methods
 
 
-
-
-
     def close(self) -> None:
+        """Clear attributes and close the camera."""
+        self.clear()
+        self._cam.close()
 
-        if not self.closed:
-            self._cam.close()
+
+    def clear(self) -> None:
+        self.clear_frame_attrs()
+        self.clear_still_attrs()
+        self.clear_streaming_attrs()
+
+
+    def clear_frame_attrs(self) -> None:
+        """
+        Reset frame attributes.
+        """
+        with self.frame_lock:
+            self._frame = None
+            self._frame_counter = 0
+            self._frame_clock = Clock()
+            clear_queue(self.frame_queue)
+
+
+    def clear_still_attrs(self) -> None:
+        with self.still_lock:
+            self._still_info = {}
+
+
+    def clear_streaming_attrs(self) -> None:
+        with self.streaming_lock:
+            self._streaming_info = {}
 
 
     def reopen(self) -> None:
-
-        if not self.closed:
-            self.close()
-            time.sleep(0.5)
+        """Close the camera if open, the reopen it."""
+        self.close()
         self._init_cam()
 
 
-
-
-
-
-    #--------------------------------------------------------------------------#
     # Recording/previewing
+    def capture(self, out: Optional[PathLike] = None) -> None:
+        self.clear_frame_attrs()
+        self.clear_still_attrs()
 
 
-    def start_preview(self):
+    def start_streaming(self) -> None:
+        self.clear_frame_attrs()
+        self.clear_streaming_attrs()
+        buf = FrameBuffer(self)
+        self._cam.start_recording(buf, 'rgb')
 
-        self.reset()
-        self.frame_buffer = FrameBuffer(self)
-        with self.lock:
-            self._active = True
-            self._countdown_timer = None
-        print(f'Starting preview.', flush=True)
-        self._cam.start_recording(self.frame_buffer, 'rgb')
-        while not self._stop:
-            self._cam.wait_recording(1)
+
+    def wait_streaming(self, timeout: float) -> None:
+        self._cam.wait_recording(timeout)
+
+
+    def stop_streaming(self) -> None:
         self._cam.stop_recording()
-        print(f'Previewed {self._index} frames')
-
-
-    def stop_preview(self):
-        self._cam.stop_recording()
-
-
-    def start_recording(self,
-                        duration: float,
-                        interval: float = 2.0,
-                        ) -> None:
-
-
-        """
-        Record for a fixed period of time.
-        """
-
-        self.reset()
-        # Setup frame buffer.
-        self.frame_buffer = FrameBuffer(self)
-        with self.lock:
-            self._active = True
-            self._countdown_timer = CountdownTimer(duration)
-        print(f'Starting recording: {duration} secs.', flush=True)
-        self._cam.start_recording(self.frame_buffer, 'rgb')
-        while True:
-            self._cam.wait_recording(interval)
-            if self._stop or self._countdown_timer() <= 0:
-                break
-
-        self._cam.stop_recording()
-
-
-    def stop_recording(self) -> None:
-        print(f'Stopping recording.', flush=True)
-        #with self.lock:
-        self._stop = True
-        self._active = False
-        self._cam.stop_recording()
-        print('Done.', flush=True)
+        time.sleep(0.1)
 
 
 
     #-------------------------------------------------------------------------#
     # Private/protected methods
 
+
     def _init_cam(self):
 
         # Start picamera, and update with requested config.
-        self._cam = picamera.PiCamera(resolution=_DEFAULTS['resolution'],
-                                      framerate=_DEFAULTS['framerate'],
-                                      sensor_mode=_DEFAULTS['sensor_mode'])
+        self._cam = PiCamera(resolution=_DEFAULTS['resolution'],
+                             framerate=_DEFAULTS['framerate'],
+                             sensor_mode=_DEFAULTS['sensor_mode'])
         time.sleep(2.0)
         for key, val in _DEFAULTS.items():
             if key not in ('resolution', 'framerate', 'sensor_mode'):
                 setattr(self, key, val)
 
-    def _reset(self):
-
-        # while not self.frame_queue.empty():
-        #     self.frame_queue.get()
-
-        # Reset frame and its counters.
-        with self.lock:
-            self.frame = None
-            self._frame_counter = 0
-            if self._clock is not master_clock:
-                self._clock.reset()
-
-        # Reinitialize frame buffer.
-        if self._frame_buffer:
-            self._frame_buffer.close()
-            self._frame_buffer = None
-            time.sleep(0.01)
-        self._frame_buffer = FrameBuffer(self)
-
-        # Clear remaining state variables.
-        self._countdown_timer = None
-        self._state = 'waiting'
 
 
-    def _frame_buffer_callback(self, data: np.ndarray) -> None:
+    def _frame_callback(self, data: np.ndarray) -> None:
+        pass
+
+    def _recording_callback(self, data: np.ndarray) -> None:
 
         """
         Called by the frame buffer upon new frame being written.
