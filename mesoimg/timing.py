@@ -6,7 +6,6 @@ import numpy as np
 __all__ = [
     'Clock',
     'CountdownClock',
-    'FrameTimer',
 ]
 
 
