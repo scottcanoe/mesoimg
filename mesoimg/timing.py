@@ -1,17 +1,12 @@
-from collections import OrderedDict
-import logging
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Tuple, Optional
 import time
-from time import perf_counter
 import numpy as np
 
 
 __all__ = [
     'Clock',
-    'master_clock',
-    'CountdownTimer',
-    'IntervalTimer',
-    'repr_secs',
+    'CountdownClock',
+    'FrameTimer',
 ]
 
 
@@ -23,135 +18,122 @@ class Clock:
     Clock's "t-zero" is set when instantiated.
     """
 
-    def __init__(self, can_reset: bool = True):
+    def __init__(self,
+                 can_reset: bool = True,
+                 time_fn: Callable[[], float] = time.perf_counter,
+                 ):
+
         self._can_reset = can_reset
-        self._t_start = perf_counter()
+        self._time_fn = time_fn
+        self._datum = self._time_fn()
+
 
     @property
-    def can_reset(self) -> bool:
+    def can_reset(self):
         return self._can_reset
 
     def reset(self) -> None:
-        if self._can_reset:
-            self._t_start = perf_counter()
-        else:
-            raise TypeError("Clock instance cannot be reset.")
+        if not self.can_reset:
+            raise AttributeError("clock cannot be reset.")
+        self._datum = self._time_fn()
 
-    def __call__(self):
+
+    def __call__(self) -> float:
         """
         Get the clock's current time.
         """
-        return perf_counter() - self._t_start
-
-
-master_clock = Clock(can_reset=False)
+        return self._time_fn() - self._datum
 
 
 
-class CountdownTimer:
+class CountdownClock(Clock):
 
-    def __init__(self, duration: float):
+    def __init__(self, duration: float, **kw):
+        super().__init__(**kw)
         self._duration = duration
-        self._t_start = perf_counter()
 
     @property
     def duration(self) -> float:
         return self._duration
 
-    def reset(self) -> None:
-        self._t_start = perf_counter()
-
-    def __call__(self):
+    def __call__(self) -> float:
         """
-        Get the clock's remaining time.
+        Get the clock's remaining time. May be negative.
         """
-        return self._duration - (perf_counter() - self._t_start)
+        return self._duration - (self._time_fn() - self._datum)
 
 
 
-class IntervalTimer:
+
+
+
+
+class EventLogger:
+
+
+
 
     """
-    Class for ticking off intervals.
+    Log event times.
     """
+
+
 
     def __init__(self,
-                 name: str = '',
-                 start: bool = True,
-                 verbose: bool = False,
+                 ID: Optional[Any] = None,
+                 can_reset: bool = True,
                  time_fn: Callable[[], float] = time.perf_counter,
-                 logger: Optional[logging.Logger] = None):
+                 start: bool = False,
+                 ):
 
-        self._name = name
-        self._verbose = verbose
+        self.ID = ID
+        self._can_reset = can_reset
         self._time_fn = time_fn
-        self._logger = logger
-        self.reset()
-        if start:
-            self.start()
+        self._datum = self._time_fn()
+        self._entries = []
+
 
     @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def running(self) -> bool:
-        return self._running
+    def can_reset(self):
+        return self._can_reset
 
     @property
     def timestamps(self) -> np.ndarray:
-        if isinstance(self._timestamps, list):
-            return np.array(self._timestamps)
-        return self._timestamps
+        return np.array(self._timestamps)
+
+
+    @property
+    def entries(self):
+        return tuple(self._entries)
 
     @property
     def count(self) -> int:
         return len(self._timestamps)
+
+    @property
+    def timestamps(self) -> np.ndarray:
+        return np.ndarray([e.timestamp for e in self._entries])
 
 
     def reset(self) -> None:
         """
         Reset all attributes regardless of whether timer is running.
         """
-        self._t_start = None
-        self._t_stop = None
-        self._running = False
-        self._timestamps = []
+        if not self._can_reset:
+            raise AttributeError("event logger cannot be reset.")
+        self._datum = self._time_fn()
+        self._entries = []
 
 
-    def start(self) -> float:
+    def log(self, event: Optional[Any] = None) -> float:
         """
-        Start the timer. Does not add a timestamp.
+        Log an event.
         """
-        t = self._time_fn()
-        self._check_not_running()
-        self._running = True
-        self._t_start = t
-        return 0
 
+        timestamp = self._time_fn() - self._datum
+        self._entries.append(Entry(timestamp=timestamp, event=event))
+        return timestamp
 
-    def tic(self) -> float:
-        """
-        Add a timestamp.
-        """
-        t = self._time_fn() - self._t_start
-        self._check_running()
-        self._timestamps.append(t)
-        return self
-
-
-    def stop(self) -> float:
-        """
-        Stop the timer. Set ``tic=True`` to append timestamps
-        with stop time. Prints a summary if verbose.
-        """
-        t = self._time_fn() - self._t_start
-        self._check_running()
-        self._running = False
-        self._t_stop = t
-        self._timestamps = np.array(self._timestamps)
-        if self._verbose:
-            self.print_summary()
 
 
     def tell(self) -> float:
@@ -160,17 +142,6 @@ class IntervalTimer:
         """
         return self._time_fn() - self._t_start
 
-
-    def _check_running(self) -> None:
-        """Raise ``RuntimeError`` if not running."""
-        if not self._running:
-            raise RuntimeError('Timer is not running.')
-
-
-    def _check_not_running(self) -> None:
-        """Raise ``RuntimeError`` if running."""
-        if self._running:
-            raise RuntimeError('Timer is running.')
 
 
     def print_summary(self) -> None:
@@ -199,22 +170,5 @@ class IntervalTimer:
 
         print(s, flush=True)
 
-
-
-
-def repr_secs(secs: float):
-    """
-    Format duration into a string, including appropriate units.
-    """
-
-    sign, secs = np.sign(secs), np.abs(secs)
-    if secs >= 1:
-        return sign * secs, 'sec.'
-    if secs >= 1e-3:
-        return sign * secs * 1e3, 'msec.'
-    elif secs >= 1e-6:
-        return sign * secs * 1e6, 'usec.'
-    else:
-        return sign * secs * 1e9, 'nsec'
 
 
