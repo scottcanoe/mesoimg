@@ -1,11 +1,12 @@
-import _pickle as pickle
+from enum import IntEnum
 from typing import Any, ClassMethod, Container, Dict, Tuple, Union
 import numpy as np
 import zmq
-from mesoimg.common import Frame
+from mesoimg.arrays import Frame
 
 
 __all__ = [
+    'Ports',
     'setsockattr',
     'getsockattr',
     'send_array',
@@ -22,6 +23,14 @@ __all__ = [
     'recv_string',
 ]
 
+
+class Ports(IntEnum):
+    """
+    Enum for holding port numbers.
+    """
+    COMMAND    = 7000
+    FRAME_PUB  = 7001
+    STATUS_PUB = 7002
 
 
 def setsockattr(sock: zmq.Socket,
@@ -91,8 +100,8 @@ def send_frame(socket: zmq.Socket,
     """
     Send a `Frame` object over a zmq socket.
     """
-    md = {'shape': data.data.shape,
-          'dtype': str(data.data.dtype),
+    md = {'shape': data.shape,
+          'dtype': str(data.dtype),
           'index': data.index,
           'timestamp' : data.timestamp}
     socket.send_json(md, flags | zmq.SNDMORE)

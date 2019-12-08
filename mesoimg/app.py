@@ -1,8 +1,9 @@
 import contextlib
+import json
 import os
 from pathlib import Path
 import time
-from typing import Any, Optional, Union
+from typing import Any, Dict, Optional, Union
 import subprocess as sp
 import psutil
 
@@ -10,10 +11,10 @@ import psutil
 __all__ = [
     'appdir',
     'userdir',
-    'read_snippet',
-    'write_snippet',
-    'delete_snippet',
-    'kill_zombied_camera',
+    'read_procinfo',
+    'write_procinfo',
+    'delete_procinfo',
+    'kill_from_procinfo',
 ]
 
 
@@ -22,7 +23,7 @@ USERDIR = Path.home() / '.mesoimg'
 if not USERDIR.exists():
     USERDIR.mkdir()
 
-for name in ('cache', 'logs', 'snippets'):
+for name in ('cache', 'logs', 'procinfo', 'snippets'):
     p = USERDIR / name
     if not p.exists():
         p.mkdir()
@@ -36,42 +37,54 @@ def userdir() -> Path:
     return USERDIR
 
 
-def read_snippet(name: str, *default) -> Any:
-    path = USERDIR / 'snippets' / name
-    if not path.exists() and default:
-        return default[0]
-    return path.read_text()
+def read_procinfo(fname: str) -> Dict:
+    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
+    with open(path, 'r') as f:
+        return json.load(f)
 
 
-def write_snippet(name: str, text: str) -> None:
-    path = USERDIR / 'snippets' / name
-    path.write_text(text)
+def write_procinfo(fname: str) -> None:
+
+    proc = psutil.Process()
+    info = {'pid' : proc.pid,
+            'create_time' : proc.create_time(),
+            'name' : proc.name()}
+    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
+    with open(path, 'w') as f:
+        json.dump(info, f, indent=2)
 
 
-def delete_snippet(name: str) -> None:
-    path = USERDIR / 'snippets' / name
+def delete_procinfo(fname: str) -> Dict:
+    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
     if path.exists():
         path.unlink()
 
 
-def kill_zombied_camera():
+def kill_from_procinfo(fname: str) -> bool:
 
-    fname = 'picamera.pid'
+    try:
+        info = read_procinfo(fname)
+    except FileNotFoundError:
+        print('No procinfo for "{fname}".')
+        return False
 
-    pid = int(read_snippet(fname, 0))
-    if pid == 0 or pid == os.getpid():
-        return
+    pid = info['pid']
+    if pid == os.getpid():
+        print('Camera is owned by this process. Will not kill current process.')
+        return False
 
     try:
         proc = psutil.Process(pid)
     except psutil.NoSuchProcess:
-        delete_snippet(fname)
+        print('Process no longer exists. Deleting procinfo file.')
+        delete_procinfo(fname)
+        return False
 
-    if proc.name() != 'python':
-        return
+    if proc.create_time() != info['create_time']:
+        print('Create times do not match. Not killing process.')
+        return False
 
-    print(f'Killing process that last created a PiCamera instance (pid={pid}).')
+    print(f'Killing process (pid={pid}).')
     proc.kill()
-    time.sleep(1)
-    delete_snippet(fname)
+    return True
 

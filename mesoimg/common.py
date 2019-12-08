@@ -1,4 +1,3 @@
-from enum import IntEnum
 import json
 import os
 import pathlib
@@ -12,7 +11,6 @@ from typing import (Any,
                     Callable,
                     Dict,
                     List,
-                    NamedTuple,
                     Tuple,
                     Union,
                     )
@@ -25,11 +23,7 @@ import zmq
 __all__ = [
 
     # Shares classes and constants.
-    'Frame',
     'PathLike',
-
-    # Networking
-    'Ports',
 
     # Threading, multiprocessing, etc.
     'clear_q',
@@ -73,33 +67,6 @@ __all__ = [
 
 
 PathLike = Union[str, pathlib.Path]
-
-
-class Frame(NamedTuple):
-    """
-    Named tuple that encapsulates an imaging frame along
-    frame number and a timestamp.
-    """
-    data: np.ndarray
-    index: int
-    timestamp: float
-
-
-#------------------------------------------------------------------------------#
-# Networking
-
-
-class Ports(IntEnum):
-    """
-    Enum for holding port numbers.
-    """
-    COMMAND    = 7000
-    FRAME_PUB  = 7001
-    STATUS_PUB = 7002
-
-
-
-
 
 
 #------------------------------------------------------------------------------#
@@ -308,8 +275,10 @@ def get_writer(path: PathLike, *args, **kw) -> Callable:
         return write_raw
     raise ValueError(f'No writer for file: {path}')
 
+
 #------------------------------------------------------------------------------#
 # etc
+
 
 _pi_info = {}
 if os.path.exists('/etc/os-release'):

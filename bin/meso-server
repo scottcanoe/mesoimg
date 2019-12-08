@@ -1,8 +1,10 @@
 #!/usr/bin/python
-
+import argparse
+import os
 import sys
-from mesoimg.server import *
+from mesoimg.osutils import *
 
-s = MesoServer()
 
+print('meso-server')
+print(f'argv: {sys.argv}')
 

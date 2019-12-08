@@ -1,3 +1,4 @@
+import os
 import sys
 from threading import Event, Lock, Thread
 import time
@@ -6,10 +7,11 @@ from typing import Any, Dict, List, Union
 import glom
 import numpy as np
 import zmq
+from mesoimg.app import *
 from mesoimg.common import *
 from mesoimg.camera import *
 from mesoimg.outputs import *
-
+import psutil
 
 
 class MesoServer:
@@ -24,6 +26,7 @@ class MesoServer:
                  context: Optional[zmq.Context] = None,
                  start: bool = False,
                  ):
+
 
         print('Initializing MesoServer.')
 
@@ -60,6 +63,9 @@ class MesoServer:
 
     #--------------------------------------------------------------------------#
     # Main event loop
+
+    def start(self):
+        pass
 
 
     def run(self):
@@ -226,7 +232,11 @@ class MesoServer:
     # etc.
 
 
-def write_prompt():
-    sys.stdout.write('>>> ')
+def start_server():
+    server = MesoServer()
+    server_thread = Thread(target=server.run)
+    server_thread.start()
+
+
 
 

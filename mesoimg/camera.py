@@ -21,7 +21,8 @@ import numpy as np
 import picamera
 from picamera import PiCamera
 import zmq
-from mesoimg.buffers import *
+from mesoimg.arrays import Frame
+from mesoimg.buffers import FrameBuffer
 from mesoimg.common import *
 from mesoimg.timing import *
 from mesoimg.outputs import *
@@ -39,7 +40,7 @@ _DEFAULTS: ClassVar[Dict[str, Any]] = {\
     'channels' : 'g',
     'framerate' :  30.0,
     'sensor_mode' : 7,
-    'exposure_mode' : 'sports',
+    'exposure_mode' : 'auto',
     'iso' : 0,
     'awb_mode' : 'off',
     'awb_gains' : (1.0, 1.0),
@@ -47,9 +48,8 @@ _DEFAULTS: ClassVar[Dict[str, Any]] = {\
     }
 
 
-
-
 _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
+    'streaming',
     'resolution',
     'channels',
     'framerate',
@@ -76,7 +76,6 @@ def validate_channels(ch: str) -> str:
 class Camera:
 
 
-
     def __init__(self, **config):
 
         # Basic attributes.
@@ -90,7 +89,8 @@ class Camera:
 
         # Threading and synchronization
         self.new_frame = Condition()
-        self.frame_q = queue.Queue(maxsize=30)
+        self.frame_q = queue.Queue(maxsize=10)
+        self.status_q = queue.Queue(maxsize=10)
 
         # Create the picamera instance with defaults.
         self._init_cam()
@@ -235,7 +235,7 @@ class Camera:
     @property
     def status(self) -> Dict[str, Any]:
         """Dictionary containing various properties."""
-        return {name : getattr(self, name) for name in STATUS_ATTRS}
+        return {name : getattr(self, name) for name in _STATUS_ATTRS}
 
 
     #--------------------------------------------------------------------------#
@@ -247,7 +247,7 @@ class Camera:
 
         """
 
-        from mesoimg.app import kill_zombied_camera, write_snippet
+        from mesoimg.app import kill_from_procinfo, write_procinfo
 
         resolution  = _DEFAULTS['resolution']
         framerate   = _DEFAULTS['framerate']
@@ -261,17 +261,17 @@ class Camera:
                                      framerate=framerate,
                                      sensor_mode=sensor_mode)
             except picamera.exc.PiCameraMMALError:
-                kill_zombied_camera()
+                kill_from_procinfo('picamera')
+                time.sleep(1)
                 self._cam = PiCamera(resolution=resolution,
                                      framerate=framerate,
                                      sensor_mode=sensor_mode)
 
-            write_snippet('picamera.pid', str(os.getpid()))
+            write_procinfo('picamera')
 
             for key, val in _DEFAULTS.items():
                 if key not in ('resolution', 'framerate', 'sensor_mode'):
                     setattr(self, key, val)
-
             time.sleep(1.0)
 
 
@@ -285,10 +285,12 @@ class Camera:
             self._frame_counter = 0
             self._frame_clock = Clock()
             clear_q(self.frame_q)
+            clear_q(self.status_q)
 
 
     def close(self) -> None:
-        """Close the picamera instance."""
+        """Clear and close the picamera instance."""
+        self.clear()
         self._cam.close()
 
 
@@ -300,7 +302,6 @@ class Camera:
         """
         self.close()
         self._init_cam()
-        self.clear()
 
 
     #--------------------------------------------------------------------------#
@@ -343,7 +344,6 @@ class Camera:
         if not self.streaming:
             raise RuntimeError('Camera is not streaming.')
         self._cam.stop_recording()
-        time.sleep(0.01)
 
 
     def stream_for(self, duration: float) -> None:
@@ -376,19 +376,19 @@ class Camera:
     def _frame_callback(self, data: np.ndarray) -> None:
 
         """
-        Called by the frame buffer upon new frame being written.
+        Called by the frame buffer upon new frame being produced.
         """
 
         # Update frame and its counters.
-
         with self.frame_lock:
             index, timestamp = self._frame_counter, self._frame_clock()
             self._frame_counter += 1
-            self._frame = Frame(data=data, index=index, timestamp=timestamp)
+            self._frame = Frame(data, index=index, timestamp=timestamp)
 
-        # Notify.
+        # Update frame and status queues.
+        put_q(self.frame_q, self._frame)
+        put_q(self.status_q, self.status)
         with self.new_frame:
-            put_q(self.frame_q, self._frame)
             self.new_frame.notify_all()
 
 
@@ -417,6 +417,7 @@ class Camera:
 
         s  = '       Camera      \n'
         s += '-------------------\n'
+        s += f'streaming: {self.streaming}\n'
         s += f'sensor mode: {self.sensor_mode}\n'
         s += f'resolution: {self.resolution}\n'
         s += f'channels: {str(self.channels)}\n'
@@ -432,7 +433,6 @@ class Camera:
         s += f'iso : {self.iso}\n'
         s += f'exposure speed: {self.exposure_speed} usec.\n'
         s += f'shutter speed: {self.shutter_speed} usec.\n'
-
 
         # Report auto-white balance.
         s += f'awb mode: {self.awb_mode}\n'
