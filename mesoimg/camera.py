@@ -18,6 +18,7 @@ from typing import (Any,
                     Union)
 import queue
 import numpy as np
+import picamera
 from picamera import PiCamera
 import zmq
 from mesoimg.buffers import *
@@ -80,9 +81,6 @@ class Camera:
 
         # Basic attributes.
         self.lock = Lock()
-        self.rlock = RLock()
-        self._capturing = False
-        self._streaming = False
 
         # Frame attributes.
         self.frame_lock = Lock()
@@ -94,9 +92,8 @@ class Camera:
         self.new_frame = Condition()
         self.frame_q = queue.Queue(maxsize=30)
 
+        # Create the picamera instance with defaults.
         self._init_cam()
-
-
 
 
     #--------------------------------------------------------------------------#
@@ -110,8 +107,8 @@ class Camera:
 
     @resolution.setter
     def resolution(self, res: Tuple[int, int]) -> None:
-        if self.acquiring:
-            raise RuntimeError('cannot modify resolution while acquiring.')
+        if self.streaming:
+            raise RuntimeError('cannot modify resolution while streaming.')
         self._cam.resolution = res
 
     @property
@@ -128,8 +125,8 @@ class Camera:
 
     @sensor_mode.setter
     def sensor_mode(self, mode: int) -> None:
-        if self.acquiring:
-            raise RuntimeError('cannot modify resolution while acquiring.')
+        if self.streaming:
+            raise RuntimeError('cannot modify resolution while streaming.')
         self._cam.sensor_mode = mode
 
     @property
@@ -199,12 +196,8 @@ class Camera:
 
 
     #--------------------------------------------------------------------------#
-    # various properties
+    # Extra properties
 
-
-    @property
-    def acquiring(self) -> bool:
-        return self._capturing or self._streaming
 
     @property
     def channels(self) -> str:
@@ -212,20 +205,18 @@ class Camera:
 
     @channels.setter
     def channels(self, ch: str) -> None:
-        if self.acquiring:
-            raise RuntimeError('cannot modify resolution while acquiring.')
+        if self.streaming:
+            raise RuntimeError('cannot modify resolution while streaming.')
         self._channels = validate_channels(ch)
 
     @property
-    def capturing(self) -> bool:
-        return self._capturing
-
-    @property
     def streaming(self) -> bool:
-        return self._streaming
+        """Whether the camera is busy recording data."""
+        return self._cam.recording
 
     @property
     def frame(self) -> Optional[Frame]:
+        """Most recently captured frame."""
         return self._frame
 
     @property
@@ -243,14 +234,131 @@ class Camera:
 
     @property
     def status(self) -> Dict[str, Any]:
+        """Dictionary containing various properties."""
         return {name : getattr(self, name) for name in STATUS_ATTRS}
 
 
     #--------------------------------------------------------------------------#
-    # Public methods
+    # Opening, closing, etc.
+
+    def _init_cam(self):
+
+        """
+
+        """
+
+        from mesoimg.app import kill_zombied_camera, write_snippet
+
+        resolution  = _DEFAULTS['resolution']
+        framerate   = _DEFAULTS['framerate']
+        sensor_mode = _DEFAULTS['sensor_mode']
+
+        with self.lock:
+
+            # Start picamera, and update with requested config.
+            try:
+                self._cam = PiCamera(resolution=resolution,
+                                     framerate=framerate,
+                                     sensor_mode=sensor_mode)
+            except picamera.exc.PiCameraMMALError:
+                kill_zombied_camera()
+                self._cam = PiCamera(resolution=resolution,
+                                     framerate=framerate,
+                                     sensor_mode=sensor_mode)
+
+            write_snippet('picamera.pid', str(os.getpid()))
+
+            for key, val in _DEFAULTS.items():
+                if key not in ('resolution', 'framerate', 'sensor_mode'):
+                    setattr(self, key, val)
+
+            time.sleep(1.0)
 
 
-    # Bulk attribute getting/setting
+    def clear(self) -> None:
+
+        if self.streaming:
+            raise RuntimeError("Cannot clear camera while streaming. ")
+
+        with self.frame_lock:
+            self._frame = None
+            self._frame_counter = 0
+            self._frame_clock = Clock()
+            clear_q(self.frame_q)
+
+
+    def close(self) -> None:
+        """Close the picamera instance."""
+        self._cam.close()
+
+
+    def reopen(self) -> None:
+        """
+        Close the current PiCamera instance, and replace it
+        with a newly initialized one. Also resets various attributes,
+        (e.g., ``frame``, ``frame_q``).
+        """
+        self.close()
+        self._init_cam()
+        self.clear()
+
+
+    #--------------------------------------------------------------------------#
+    # Capturing and streaming methods
+
+
+    def capture(self,
+                out: Optional[PathLike] = None,
+                use_video_port: bool = True,
+                ) -> None:
+
+        if self.streaming:
+            raise RuntimeError('Cannot capture while streaming in progress.')
+
+        self.clear()
+        buf = FrameBuffer(self)
+        self._cam.capture(buf, 'rgb', use_video_port=True)
+        if out:
+            fn = get_writer(out)
+            fn(out, self.frame.data)
+
+
+    def start_streaming(self) -> None:
+
+        if self.streaming:
+            raise RuntimeError('Camera is already streaming.')
+
+        self.clear()
+        buf = FrameBuffer(self)
+        self._cam.start_recording(buf, 'rgb')
+
+
+    def wait_streaming(self, timeout: float) -> None:
+        if not self.streaming:
+            raise RuntimeError('Camera is not streaming.')
+        self._cam.wait_recording(timeout)
+
+
+    def stop_streaming(self) -> None:
+        if not self.streaming:
+            raise RuntimeError('Camera is not streaming.')
+        self._cam.stop_recording()
+        time.sleep(0.01)
+
+
+    def stream_for(self, duration: float) -> None:
+        self.start_streaming()
+        self.wait_streaming(duration)
+        self.stop_streaming()
+
+
+    def stream_until(self, event: Any) -> None:
+        pass
+
+
+    #--------------------------------------------------------------------------#
+    # utilities
+
 
     def getattrs(self, keys: Iterable[str]) -> List:
         return [getattr(self, name) for name in keys]
@@ -261,120 +369,8 @@ class Camera:
             setattr(self, key, val)
 
 
-    # Opening/closing/reopening/resetting methods
-
-    def clear(self) -> None:
-
-        if self.acquiring and not force:
-            raise RuntimeError("cannot clear camera when acquiring. ")
-
-        with self.lock:
-            self._capturing = False
-            self._streaming = False
-
-        with self.frame_lock:
-            self._frame = None
-            self._frame_counter = 0
-            self._frame_clock = Clock()
-            clear_q(self.frame_q)
-
-
-    def close(self) -> None:
-        """
-        Clear attributes and close the camera.
-        """
-        self.clear()
-        self._cam.close()
-
-
-    def reopen(self) -> None:
-        """Close the camera if open, the reopen it."""
-        self.close()
-        self._init_cam()
-
-
-    # Recording/previewing
-    def capture(self,
-                out: Optional[PathLike] = None,
-                use_video_port: bool = True,
-                ) -> None:
-
-        self.clear()
-        buf = FrameBuffer(self)
-
-        try:
-            self._capturing = True
-            self._cam.capture(buf, 'rgb', use_video_port=True)
-        except:
-            self._capturing = False
-            buf.close()
-            raise
-
-        self._capturing = False
-        buf.close()
-
-        if out:
-            fn = get_writer(out)
-            fn(out, self.frame.data)
-
-
-    def start_streaming(self) -> None:
-        self._clear_frame_attrs()
-        self._clear_streaming_attrs()
-        buf = FrameBuffer(self)
-        self._cam.start_recording(buf, 'rgb')
-
-
-    def wait_streaming(self, timeout: float) -> None:
-        self._cam.wait_recording(timeout)
-
-
-    def stop_streaming(self) -> None:
-        self._cam.stop_recording()
-        time.sleep(0.1)
-
-
-    def stream_for(self, duration: float) -> None:
-        self.start_streaming()
-        self.wait_streaming()
-
-
-    def stream_until(self, event: Any) -> None:
-        pass
-
-
     #-------------------------------------------------------------------------#
     # Private/protected methods
-
-
-    def _init_cam(self):
-        """
-        Modifies: `_cam` with `lock`.
-        """
-        with self.lock:
-
-            # Start picamera, and update with requested config.
-            self._cam = PiCamera(resolution=_DEFAULTS['resolution'],
-                                 framerate=_DEFAULTS['framerate'],
-                                 sensor_mode=_DEFAULTS['sensor_mode'])
-
-            for key, val in _DEFAULTS.items():
-                if key not in ('resolution', 'framerate', 'sensor_mode'):
-                    setattr(self, key, val)
-
-            time.sleep(1.0)
-
-
-    def _clear_frame_attrs(self) -> None:
-        """
-        Reset frame attributes. Does not check for acquiring.
-        """
-        with self.frame_lock:
-            self._frame = None
-            self._frame_counter = 0
-            self._frame_clock = Clock()
-            clear_q(self.frame_q)
-
 
 
     def _frame_callback(self, data: np.ndarray) -> None:
@@ -384,7 +380,6 @@ class Camera:
         """
 
         # Update frame and its counters.
-
 
         with self.frame_lock:
             index, timestamp = self._frame_counter, self._frame_clock()
@@ -411,7 +406,8 @@ class Camera:
 
         n_frames = self._frame_counter - 1
         fps = n_frames / duration
-        print(f'Produced {n_frames} frames in {duration} secs. (fps={fps})', flush=True)
+        reprt = f'Produced {n_frames} frames in {duration} secs. (fps={fps})'
+        print(report, flush=True)
 
 
     def __repr__(self):

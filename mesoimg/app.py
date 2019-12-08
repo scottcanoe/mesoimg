@@ -1,21 +1,31 @@
 import contextlib
 import os
 from pathlib import Path
+import time
 from typing import Any, Optional, Union
 import subprocess as sp
+import psutil
+
 
 __all__ = [
     'appdir',
     'userdir',
-    'init_userdir',
     'read_snippet',
     'write_snippet',
-    'init_userdir',
+    'delete_snippet',
+    'kill_zombied_camera',
 ]
 
 
 APPDIR = Path(__file__).parent.parent
 USERDIR = Path.home() / '.mesoimg'
+if not USERDIR.exists():
+    USERDIR.mkdir()
+
+for name in ('cache', 'logs', 'snippets'):
+    p = USERDIR / name
+    if not p.exists():
+        p.mkdir()
 
 
 def appdir() -> Path:
@@ -38,17 +48,30 @@ def write_snippet(name: str, text: str) -> None:
     path.write_text(text)
 
 
+def delete_snippet(name: str) -> None:
+    path = USERDIR / 'snippets' / name
+    if path.exists():
+        path.unlink()
 
 
+def kill_zombied_camera():
 
+    fname = 'picamera.pid'
 
-def init_userdir():
-    if not USERDIR.exists():
-        USERDIR.mkdir()
+    pid = int(read_snippet(fname, 0))
+    if pid == 0 or pid == os.getpid():
+        return
 
-    for name in ('cache', 'logs', 'snippets'):
-        p = USERDIR / name
-        if not p.exists():
-            p.mkdir()
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        delete_snippet(fname)
 
-init_userdir()
+    if proc.name() != 'python':
+        return
+
+    print(f'Killing process that last created a PiCamera instance (pid={pid}).')
+    proc.kill()
+    time.sleep(1)
+    delete_snippet(fname)
+
