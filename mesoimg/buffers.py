@@ -2,7 +2,7 @@ import io
 from typing import Tuple
 import numpy as np
 from picamera.array import raw_resolution
-
+from mesoimg.common import as_contiguous
 
 
 __all__ = [
