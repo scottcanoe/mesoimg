@@ -9,6 +9,7 @@ from mesoimg.common import *
 from mesoimg.inputs import *
 from mesoimg.messaging import *
 from mesoimg.parsing import *
+from mesoimg.requests import *
 
 import logging
 logfile = userdir() / 'logs' / 'log.txt'
@@ -20,29 +21,22 @@ __all__ = [
 ]
 
 
-
-
 class MesoClient:
 
 
 
-    def __init__(self,
-                 host: str = 'pi-meso.local',
-                 start: bool = False,
-                 ):
+    def __init__(self, host: str = 'pi-meso.local'):
 
         logging.info('Initializing client.')
 
         # Networking.
+        self._host = host
         self.sockets = {}
         self.pollers = {}
         self.connect()
 
         # Conccurrency.
         self.threads = {}
-
-        if start:
-            self.run()
 
 
     def connect(self):
@@ -77,67 +71,73 @@ class MesoClient:
         self.pollers.clear()
 
 
-    #------------------------------------------------------------------------------------#
-    # Main event loop
-
-    #def run(self):
-        #"""
-        #Event loop that read user input from stdin, interprets them as requests,
-        #sends requests, and finally handles replies.
-
-        #The target object (the 'base' of the namespace) is implicitly the client
-        #instance itself.
+    def close(self):
+        self.disconnect()
 
 
-        #"""
-        #if self._running:
-            #msg = 'Client is already running.'
-            #logging.error(msg)
-            #raise RuntimeError(msg)
-
-        ## Alias
-        #server = self._sockets['server']
-        #shell = self._sockets['shell']
-        #poller = self._poller
-        #timeout = self.polling_timeout * 1000
-
-        #while not self._terminate:
-            #poll_result = dict(poller.poll(timeout))
-
-            ## Check for responses from the server.
-            #if can_recv(server, poll_result):
-                #rep = server.read_json()
-                #self._handle_server_reply(rep)
-
-            ## Check for input from the shell/terminal.
-            #if can_recv(shell, poll_result):
-                #req = shell.read_string()
-                #self._handle_shell_request(req)
+    def send(self, req: Dict) -> None:
+        """
+        Final method in pipeline for sending requests to the server.
+        """
+        logging.debug(f'Sending request: {req}')
+        self.cmd.send_json(req)
 
 
-        ## Finally, shut everything down neatly.
-        #self._shutdown()
+    def send_get(self, key: str) -> Any:
+        """
+        Main gateway for retrieving attributes from the server's side. The server
+        instance is the target (implicitly). Use this method to ensures that that the
+        request is well-formed. Provided as a convenience.
+
+        Get requests have the following structure:
+          - 'action' : str     Aalways 'get'.
+          - 'key' : str      Name of attribute to set.
+
+        """
+        req = {'action' : 'get',
+               'key'    : key}
+        return self.send(req)
 
 
-    #def _handle_server_reply(self, rep: Dict) -> None:
-        #"""
-        #Replies: print to screen?
-        #"""
+    def send_set(self, key: str, val: Any) -> Any:
+        """
+        Main gateway for setting attributes on the server side. The server instance
+        is the target (implicitly). Use this method to ensures that that the request
+        is well-formed. Provided as a convenience.
+
+        Set requests have the following structure:
+          - 'action' : str     Always 'set'.
+          - 'key' : list     Name of attribute to set.
+          - 'val' : dict     Attribute's new value.
+
+        """
+
+        req = {'action' : 'set',
+               'key' : key,
+               'val' : val}
+        return self.send(req)
 
 
+    def send_call(self, key: str, *args, **kw) -> Any:
 
+        """
+        Main gateway for calling methods on the server side. The server instance
+        is the target (implicitly). Use this method to ensures that that the request
+        is well-formed. Provided as a convenience.
 
-    #def _handle_shell_request(self, req: str) -> None:
+        Call requests have the following structure:
+          - 'action' : str   Always 'call'.
+          - 'key' : str      Name of callable.
+          - 'args' : list    A possibly empty list of positional arguments.
+          - 'kw' : dict      A possibly empty dictionary of keyword arguments.
 
-        #"""
-        #Read and parse the request
-        #"""
-        #target = infer_target(req)
-        #if target in ('cam.', 'server.'):
-            #self._sockets['server'].send_string(req)
-            #time.sleep(0.01)
+        """
 
-        #efun = infer_efun(req)
+        req = {'action' : 'call',
+               'key'  : key,
+               'args' : args,
+               'kw'   : kw}
+        return self.send(req)
 
 
 

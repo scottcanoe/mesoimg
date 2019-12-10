@@ -189,8 +189,7 @@ class MesoServer:
         #if rtype not in self._request_handlers.keys():
             #self.send_error(RuntimeError(f'invalid request type {rtype}.'))
         time.sleep(0.005)
-        self.cmd.send_json({'return' : 'hello there'})
-
+        self.cmd.send_json({'return' : ''})
         #self._request_handlers[rtype](req)
 
 
