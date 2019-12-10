@@ -40,8 +40,9 @@ __all__ = [
     'recv_string',
 
     # Threaded workers
-    'RequestReply',
+    #'RequestReply',
     'Publisher',
+    'Subscriber',
 ]
 
 
@@ -293,10 +294,13 @@ def send_frame(socket: zmq.Socket,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
+               topic: Optional[str] = None,
                ) -> None:
     """
     Send a `Frame` object over a zmq socket.
     """
+    if topic is not None:
+        socket.send_string(topic, flags | zmq.SNDMORE)
     md = {'shape': data.shape,
           'dtype': str(data.dtype),
           'index': data.index,
@@ -309,15 +313,18 @@ def recv_frame(socket: zmq.Socket,
                flags: int = 0,
                copy: bool = True,
                track: bool = False,
+               topic: Optional[str] = None,
                ) -> Frame:
     """
     Receive a `Frame` object over a zmq socket.
     """
-
+    if topic is not None:
+        t = socket.recv_string(flags)
     md = socket.recv_json(flags)
     buf = memoryview(socket.recv(flags, copy, track))
     data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
     return Frame(data, index=md['index'], timestamp=md['timestamp'])
+
 
 
 def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
@@ -364,49 +371,47 @@ def recv_string(socket: zmq.Socket, **kw) -> str:
     return socket.recv_string(**kw)
 
 
+SENDERS = (send_array,
+           send_bytes,
+           send_frame,
+           send_json,
+           send_pyobj,
+           send_string)
 
-class SocketHandler(Thread):
+RECEIVERS = (recv_array,
+             recv_bytes,
+             recv_frame,
+             recv_json,
+             recv_pyobj,
+             recv_string)
+
+
+
+
+class SocketThread(Thread):
 
     """
 
     """
 
-    _ATTACHMENT_METHOD: ClassVar[str] = ''
-    _SOCKET_TYPE: ClassVar[int] = -1
-
-
-    _socket: zmq.Socket
-    _poller: Optional[zmq.Poller] = None
-    _start_time: Optional[float] = None
-    _stop_time: Optional[float] = None
-
-    _poll_timeout: float = 0.1
-    _poll_sleep: float = 0.01
-    _linger: Optional[float] = None
+    socket: zmq.Socket
 
 
     def __init__(self,
                  sock_type: int,
-                 send: Optional[Callable] = send_bytes,
-                 recv: Optional[Callable] = recv_bytes,
+                 timeout: float = 1.0,
                  context: Optional[zmq.Context] = None,
                  ):
-
         super().__init__()
 
-        # Synchronization tools.
-        self.lock = Lock()
-        self._rlock = RLock()
-        self._terminate = Event()
-        self._run_complete = Event()
-
-        # Set send/recv methods.
-        self._send = send
-        self._recv = recv
-
-        # Initialize context.
+        # Create socket.
         ctx = context if context else zmq.Context.instance()
-        self._socket = ctx.socket(sock_type)
+        self.socket = ctx.socket(sock_type)
+        self.timeout = timeout
+
+        # Setup common variables, events, etc.
+        self.terminate = Event()
+
 
 
     @property
@@ -416,66 +421,65 @@ class SocketHandler(Thread):
         """
         return self.is_alive()
 
+    @property
+    def closed(self) -> bool:
+        """
+        See whether the socket is closed.
+        """
+        return self.socket.closed
+
 
     def bind(self, addr: str) -> None:
         """
         Bind the socket. Only allowed if thread has not yet started.
         """
-        self._check_not_started('Cannot modify socket once thread has started.')
-        with self.lock:
-            self._socket.bind(addr)
+        self._check_not_started()
+        self.socket.bind(addr)
 
 
     def connect(self, addr: str) -> None:
         """
         Connect the socket. Only allowed if thread has not yet started.
         """
-        self._check_not_started('Cannot modify socket once thread has started.')
-        with self.lock:
-            self._socket.connect(addr)
+        self._check_not_started()
+        self.socket.connect(addr)
 
 
     def getsockopt(self, key: str) -> None:
         """
         Get socket options. Only allowed if thread has not yet started.
         """
-        self._check_not_started('Cannot access socket once thread has started.')
-        with self.lock:
-            self._socket.getsockopt(key)
+        self.socket.getsockopt(key)
 
 
     def setsockopt(self, key: str, val: Any) -> None:
         """
         Set socket options. Only allowed if thread has not yet started.
         """
-        self._check_not_started('Cannot modify socket once thread has started.')
-        with self.lock:
-            self._socket.setsockopt(key, val)
+        self._check_not_started()
+        self.socket.setsockopt(key, val)
 
 
     def getsockattr(self, key: str) -> None:
         """
-        Get socket attribute. Only allowed if thread has not yet started.
+        Get socket attribute.
         """
-        self._check_not_started('Cannot access socket once thread has started.')
-        with self.lock:
-            getsockattr(self._socket, key)
+        getsockattr(self.socket, key)
 
 
     def setsockattr(self, key: str, val: Any) -> None:
         """
         Set socket attribute. Only allowed if thread has not yet started.
         """
-        self._check_not_started('Cannot access socket once thread has started.')
-        with self.lock:
-            setsockattr(self._socket, key, val)
+        self._check_not_started()
+        setsockattr(self.socket, key, val)
 
 
     def start(self) -> None:
         """
         Record the start time, and start the thread.
         """
-        self._start_time = time.time()
+        self.start_time = time.time()
         super().start()
 
 
@@ -487,259 +491,54 @@ class SocketHandler(Thread):
           value to send back to the requester.
 
         """
+        raise NotImplementedError
+        #while not self.terminate.is_set():
+            #time.sleep(0.01)
+        #self.socket.close()
+        #self.stop_time = time.time()
 
-        sock = self._socket
-        poll_timeout_msecs = self._poll_timeout * 1000
-        sleep_secs = 0.001
-
-        while not self._terminate.is_set():
-            # poll for input
-            if not sock.poll(poll_timeout_msecs):
-                time.sleep(sleep_secs)
-
-        # Close sockets,etc.
-        self._run_complete.set()
-        self._cleanup()
-        self._stop_time = time.time()
+        #self._cleanup()
 
 
-    def stop(self,
-             linger: Optional[float] = None,
-             ) -> None:
+    def stop(self) -> None:
         """
         Signal the event loop to stop.
         """
         # Request termination of the event loop, and perform timeout check.
-        self._terminate.set()
+        self.terminate.set()
 
 
-    def _cleanup(self, linger: Optional[float] = None) -> None:
-        self._stop_time = time.time()
-        self._socket.close(self._linger)
+    def _cleanup(self) -> None:
+        """
+        Other threads shouldn't call this. The call to this should
+        be at the end of `run()`.
+        """
+        self.socket.close()
 
 
-
-    def _check_not_started(self, msg: str = None):
-        if self._started:
+    def _check_not_started(self):
+        msg = 'socket is access-protected during thread execution.'
+        if self.is_alive():
             raise RuntimeError(msg)
 
 
-
-
-class RequestReply(SocketHandler):
-
+class Publisher(SocketThread):
     """
-
-
-                    state |  REQ  |  REP    Waiting for:
-                   -------+-------+-------+
-                   |  0   |  OUT  |   -   |  new msg  /  partner
-      REQ sends -> |      |       |       |
-                   |  1   |   -   |   IN  |  partner  /  recv
-   REP receives -> |      |       |       |
-                   |  2   |   -   |  OUT  |  partner  /  new msg
-     REP sends ->  |      |       |       |
-                   |  3   |  IN   |       |  recv     /  partner
-   REQ receives -> |      |       |       |
-                   | (0)  |  OUT  |       |
-
-                      .
-                      .
-                      .
-
-    When you receive, you switch from POLLIN to POLLOUT.
-    When you send a message, you are neither POLLIN or POLLOUT (until its read)
-
-    REP/REQ sockets should never be both POLLIN and POLLOUT. Pair sockets
-    can do that though.
-
 
     """
 
     def __init__(self,
-                 sock_type: int,
-                 addr: str,
-                 requests: Optional[queue.Queue],    # messages received
-                 send_q: Optional[queue.Queue] = None,    # messages to send
-                 bind: bool = False,
-                 connect: bool = False,
-                 **kw,
-                 ):
-
-        if sock_type not in (zmq.REP, zmq.REQ):
-            raise TypeError("sock_type must be zmq.REP or zmq.REQ.")
-
-        super().__init__(sock_type, **kw)
-
-        if bind:
-            self._socket.bind(addr)
-        elif connect:
-            self._socket.connect(addr)
-
-        self._poller = zmq.Poller()
-        self._poller.register(self._socket)
-
-        self.inbox = inbox
-        self.outbox = outbox
-
-
-    def run(self) -> None:
-
-        """
-        - Wait for a request from a socket.
-        - On arrival, push to client for action. Then wait for a return
-          value to send back to the requester.
-
-        """
-
-        sock = self._sock
-        poller = self._poller
-        self.start_time = time.time()
-
-        while not self._terminate.is_set():
-            """
-            If poll result is empty, then no messages have been sent.
-
-            If result has POLLIN, it means we have a message ready to read.
-            """
-            poll_result = dict(poller.poll(self._poll_timeout))
-            if sock in poll_result and sock[poll_result] == zmq.POLLIN:
-                pass
-
-            if can_recv(sock, poll_result):
-                # messages are available to read.
-                msg = self._recv(sock)
-                self.inbox.put(msg)
-
-            if can_send(sock, poll_result):
-                try:
-                    msg = self.outbox.get(timeout=self.interval)
-                except queue.Empty:
-                    continue
-                self._sender(sock, msg)
-
-            time.sleep(0.005)
-
-        poller.unregister(sock)
-        sock.close()
-        self._finished.set()
-        self.stop_time = time.time()
-
-
-    def close(self, block: bool = False) -> None:
-        self._terminate.set()
-        if block:
-            self._finished.wait()
-
-
-
-
-
-class Publisher(Thread):
-
-    """
-
-    Waits for objects in the
-
-
-    """
-
-    def __init__(self,
-                 addr: str,
+                 src: queue.Queue,
                  send: Callable,
-                 out_q: queue.Queue,
                  topic: str = '',
-                 interval: float = 0.005,
-                 context: Optional[zmq.Context] = None,
-                 ):
-
-        super().__init__()
-
-        # Synchronization tools.
-        self.lock = Lock()
-        self._terminate = Event()
-        self._finished = Event()
-
-        # Initialize socket and poller.
-        ctx = context if context else zmq.Context.instance()
-        self._sock = ctx.socket(zmq.PUB)
-        self._sock.bind(addr)
-
-        # Initialize/set sending and receiving functions and queues.
-        self._sender = send
-        self.outbox = outbox
-
-        # etc.
-        self.interval = interval
-        self.start_time = None
-        self.stop_time = None
-
-
-    @property
-    def alive(self) -> bool:
-        return self.is_alive()
-
-
-    def run(self) -> None:
-
-        """
-        - Wait for a request from a socket.
-        - On arrival, push to client for action. Then wait for a return
-          value to send back to the requester.
-
-        """
-
-        sock = self._sock
-        self.start_time = time.time()
-
-        while not self._terminate.is_set():
-            # Wait for an event or whatever.
-            try:
-                msg = self.outbox.get(timeout=self.interval)
-            except queue.Empty:
-                continue
-            self._sender(sock, msg)
-
-            time.sleep(0.005)
-
-        sock.close()
-        self._finished.set()
-        self.stop_time = time.time()
-
-
-    def close(self, block: bool = False) -> None:
-        self._terminate.set()
-        if block:
-            self._finished.wait()
-
-
-
-
-
-
-
-
-
-class Publisher(SocketHandler):
-
-    """
-
-    """
-
-    def __init__(self,
-                 addr: Optional[str] = None,
-                 topic: str = '',
-                 bind: bool = True,
                  **kw,
                  ):
 
         super().__init__(zmq.PUB, **kw)
 
-        self.outbox = outbox
-
-        if bind:
-            self._socket.bind(addr)
-
+        self.topic = topic.encode() if isinstance(topic, str) else topic
+        self.src = src
+        self.send = send
 
 
     def run(self) -> None:
@@ -751,20 +550,190 @@ class Publisher(SocketHandler):
 
         """
 
-        sock = self._sock
+        sock = self.socket
+        src = self.src
+        timeout = self.timeout
+        send = self.send
+        topic = self.topic
+        topic = topic.encode() if isinstance(topic, str) else topic
 
-        while not self._terminate.is_set():
+        while not self.terminate.is_set():
             # Wait for an event or whatever.
             try:
-                msg = self.outbox.get(timeout=self._polling_timeout)
+                data = src.get(timeout=timeout)
             except queue.Empty:
+                time.sleep(0.01)
                 continue
-            self._sender(sock, msg)
+            # Send the topic first, then use the sender for the rest.
+            sock.send(topic, zmq.SNDMORE)
+            send(sock, data)
 
-            time.sleep(0.005)
+        self._cleanup()
 
-        sock.close()
-        self._finished.set()
-        self.stop_time = time.time()
+
+
+class Subscriber(SocketThread):
+    """
+
+
+    """
+
+    def __init__(self,
+                 recv: Callable,
+                 dst: Any,
+                 topic: Optional[Union[bytes, str]] = None,
+                 **kw,
+                 ):
+
+        super().__init__(zmq.SUB, **kw)
+
+        self.recv = recv
+        if topic is not None:
+            self.subscribe(topic)
+        self.dst = dst
+
+
+    def subscribe(self, topic: Union[bytes, str]) -> None:
+        self._check_not_started()
+        topic = topic.encode() if isinstance(topic, str) else topic
+        self.socket.subscribe(topic)
+
+
+    def unsubscribe(self, topic: Union[bytes, str]) -> None:
+        self._check_not_started()
+        topic = topic.encode() if isinstance(topic, str) else topic
+        self.socket.unsubscribe(topic)
+
+
+    def run(self) -> None:
+
+        """
+        - Wait for a request from a socket.
+        - On arrival, push to client for action. Then wait for a return
+          value to send back to the requester.
+
+        """
+
+        sock = self.socket
+        sock.rcvtimeo = int(self.timeout * 1000)
+        recv = self.recv
+        dst = self.dst
+        while not self.terminate.is_set():
+            try:
+                sock.recv()   # discard topic
+            except: #zmq.Again?
+                continue
+            data = recv(sock)
+            dst.put(data)
+
+        sock._cleanup()
+
+
+
+#class RequestReply(SocketThread):
+
+    #"""
+
+
+                    #state |  REQ  |  REP    Waiting for:
+                   #-------+-------+-------+
+                   #|  0   |  OUT  |   -   |  new msg  /  partner
+      #REQ sends -> |      |       |       |
+                   #|  1   |   -   |   IN  |  partner  /  recv
+   #REP receives -> |      |       |       |
+                   #|  2   |   -   |  OUT  |  partner  /  new msg
+     #REP sends ->  |      |       |       |
+                   #|  3   |  IN   |       |  recv     /  partner
+   #REQ receives -> |      |       |       |
+                   #| (0)  |  OUT  |       |
+
+                      #.
+                      #.
+                      #.
+
+    #When you receive, you switch from POLLIN to POLLOUT.
+    #When you send a message, you are neither POLLIN or POLLOUT (until its read)
+
+    #REP/REQ sockets should never be both POLLIN and POLLOUT. Pair sockets
+    #can do that though.
+
+
+    #"""
+
+    #def __init__(self,
+                 #sock_type: int,
+                 #addr: str,
+                 #requests: Optional[queue.Queue],      # messages received
+                 #send_q: Optional[queue.Queue] = None, # messages to send
+                 #bind: bool = False,
+                 #connect: bool = False,
+                 #**kw,
+                 #):
+
+        #if sock_type not in (zmq.REP, zmq.REQ):
+            #raise TypeError("sock_type must be zmq.REP or zmq.REQ.")
+
+        #super().__init__(sock_type, **kw)
+
+        #if bind:
+            #self._socket.bind(addr)
+        #elif connect:
+            #self._socket.connect(addr)
+
+        #self._poller = zmq.Poller()
+        #self._poller.register(self._socket)
+
+        #self.inbox = inbox
+        #self.outbox = outbox
+
+
+    #def run(self) -> None:
+
+        #"""
+        #- Wait for a request from a socket.
+        #- On arrival, push to client for action. Then wait for a return
+          #value to send back to the requester.
+
+        #"""
+
+        #sock = self._sock
+        #poller = self._poller
+        #self.start_time = time.time()
+
+        #while not self._terminate.is_set():
+            #"""
+            #If poll result is empty, then no messages have been sent.
+
+            #If result has POLLIN, it means we have a message ready to read.
+            #"""
+            #poll_result = dict(poller.poll(self._poll_timeout))
+            #if sock in poll_result and sock[poll_result] == zmq.POLLIN:
+                #pass
+
+            #if can_recv(sock, poll_result):
+                ## messages are available to read.
+                #msg = self._recv(sock)
+                #self.inbox.put(msg)
+
+            #if can_send(sock, poll_result):
+                #try:
+                    #msg = self.outbox.get(timeout=self.interval)
+                #except queue.Empty:
+                    #continue
+                #self._sender(sock, msg)
+
+            #time.sleep(0.005)
+
+        #poller.unregister(sock)
+        #sock.close()
+        #self._finished.set()
+        #self.stop_time = time.time()
+
+
+    #def close(self, block: bool = False) -> None:
+        #self._terminate.set()
+        #if block:
+            #self._finished.wait()
+
 
 
