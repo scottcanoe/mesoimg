@@ -6,6 +6,7 @@ from threading import Condition, Event, Lock, RLock, Thread
 import time
 from typing import Any, Callable, ClassVar, Dict, Optional, Tuple, Union
 import numpy as np
+from superjson import json, SuperJson
 import zmq
 from mesoimg.arrays import Frame
 
@@ -323,14 +324,16 @@ def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
     """
     Send a dictionary.
     """
-    socket.send_json(data, **kw)
+    s_data = json.dumps(data)
+    socket.send_string(s_data, **kw)
 
 
 def recv_json(socket: zmq.Socket, **kw) -> Dict:
     """
     Receive a dictionary.
     """
-    return socket.recv_json(**kw)
+    s_data = socket.recv_string(**kw)
+    return json.loads(s_data)
 
 
 def send_pyobj(socket: zmq.Socket, data: Any, **kw) -> None:

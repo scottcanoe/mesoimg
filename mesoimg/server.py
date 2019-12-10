@@ -237,6 +237,15 @@ class MesoServer:
     def echo(self, val=None):
         return val
 
+    def open_camera(self):
+        pass
+        #from picamera import PiCamera
+
+    def close_camera(self):
+        pass
+
+
+
 
 if __name__ == '__main__':
 

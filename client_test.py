@@ -4,6 +4,7 @@ from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
+from superjson import json
 import zmq
 from mesoimg.app import userdir, find_from_procinfo, kill_from_procinfo, Ports
 from mesoimg.common import *
@@ -14,7 +15,7 @@ from mesoimg.requests import *
 
 import logging
 #logfile = userdir() / 'logs' / 'log.txt'
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 
 __all__ = [
@@ -42,11 +43,16 @@ class CommandSocket:
         self._port = port
         self._binds = binds
         self.timeout = timeout
+
         self._init_socket()
+
+        self.last = None # Last response returned.
+
 
 
     def _init_socket(self) -> None:
 
+        logging.info('Connecting command socket.')
         # Create and bind the socket.
         ctx = zmq.Context.instance()
         self.socket = ctx.socket(self._sock_type)
@@ -85,20 +91,27 @@ class CommandSocket:
         """
 
         logging.debug(f'Sending request: {req}')
-        sock = self.socket
         data = req.asdict() if isinstance(req, Request) else req
-        sock.send_json(data)
+        send_json(self.socket, data)
         return self.recv(**kw)
 
 
     def recv(self, **kw) -> Response:
-        timeout = kw.get('timeout', self.timeout)
+        timeout = kw.get('timeout', self.timeout) * 1000
         info = dict(self.in_poller.poll(timeout))
         if self.socket in info:
-            data = self.socket.recv_json()
+            data = recv_json(self.socket)
             resp = Response(**data)
+            self.last = resp
             logging.debug(f'Received: {resp}')
-            return resp
+
+            if resp.error:
+                pprint(resp.error)
+                return resp
+            if resp.stdout:
+                pprint(resp.stdout)
+            return resp.result
+
 
         msg  = 'No message received within timeout period. '
         msg += 'Socket is still in receiving state.'
@@ -133,29 +146,31 @@ class MesoClient:
         # Networking.
         self._host = host
         self.sockets = {}
+        self.cmd = None
 
         # Connect command socket.
         self._init()
 
         # Conccurrency.
-        self._threads = {}
+        self.threads = {}
 
 
-    def _init(self) -> None:
-        logging.info('Initializing client.')
-        self._init_sockets()
+    def _init(self, reset: bool = False) -> None:
+        logging.info(f'Initializing client (reset={reset})')
+        self._init_sockets(reset=reset)
 
 
-    def _init_sockets(self) -> None:
+    def _init_sockets(self, reset: bool = False) -> None:
 
-        logging.info('Initializing sockets.')
+        logging.info(f'Initializing sockets (reset={reset})')
 
         # Connect to server.
         self.ctx = zmq.Context()
-        self.com = CommandSocket(zmq.REQ, self._host, Ports.COMMAND)
-
-        # Store sockets.
-        self.sockets['com'] = self.com
+        if reset and self.cmd:
+            self.cmd.reset()
+        else:
+            self.cmd = CommandSocket(zmq.REQ, self._host, Ports.COMMAND)
+            self.sockets['cmd'] = self.cmd
 
 
     def close(self):
@@ -171,36 +186,36 @@ class MesoClient:
 
     def reset(self):
         self.close()
-        self._init()
+        self._init(reset=True)
 
 
     def reset_sockets(self):
         self.close_sockets()
         time.sleep(0.5)
-        self._init_sockets()
-
+        self._init_sockets(reset=True)
 
 
 if __name__ == '__main__':
 
 
-    def close():
-        return client.close()
+    client = MesoClient(host='pi-meso.local')
+    cmd = client.cmd
 
-    def reset():
-        client.reset()
+    close = client.close
+    close_sockets = client.close_sockets
 
-    def close_sockets():
-        return client.close_sockets()
+    reset = client.reset
+    reset_sockets = client.reset_sockets
 
-    def reset_sockets():
-        client.reset_sockets()
+
+    def echo(obj=None):
+        cmd.call('echo', obj)
+
 
     def exit():
         client.close()
         sys.exit()
 
-    client = MesoClient(host='127.0.0.1')
-    com = client.com
+
 
 
