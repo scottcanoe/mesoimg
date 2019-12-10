@@ -283,10 +283,3 @@ class MesoServer:
         pass
 
 
-
-
-if __name__ == '__main__':
-
-
-    server = MesoServer()
-    server.run()
