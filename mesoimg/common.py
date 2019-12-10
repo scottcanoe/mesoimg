@@ -101,7 +101,7 @@ def read_stdin(timeout: float = 0.0) -> str:
     Reads a line from stdin, if any. If no lines available, the empty
     string is returned.
     """
-    if select.select([sys.stdin], [], [], timeout)[0]:
+    if poll_stdin():
         return sys.stdin.readline()
     return ''
 
