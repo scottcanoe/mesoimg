@@ -7,65 +7,97 @@ from typing import Any, Dict, List, Union
 import glom
 import numpy as np
 import zmq
-from mesoimg.app import *
+from mesoimg.app import userdir, find_from_procinfo, kill_from_procinfo, Ports
 from mesoimg.common import *
 from mesoimg.camera import *
+from mesoimg.messaging import *
 from mesoimg.outputs import *
 import psutil
+
+
+import logging
+logfile = userdir() / 'logs' / 'log.txt'
+logging.basicConfig(filename=logfile, level=logging.DEBUG)
+
+
+__all__ == [
+    'MesoServer',
+]
+
 
 
 class MesoServer:
 
 
-    verbose: bool = False
-
-    _terminate: bool = False
+    _running: bool = False
 
 
     def __init__(self,
-                 context: Optional[zmq.Context] = None,
-                 start: bool = False,
+                 host: str = '*',
+                 start: bool = True,
                  ):
 
+        logging.info('Initializing server.')
 
-        print('Initializing MesoServer.')
-
-        if context is None:
-            ctx = zmq.Context.instance()
-
+        # Networking.
         self.sockets = {}
+        self.pollers = {}
+        self.bind()
+
+        # Conccurrency.
+        self.lock = Lock()
         self.threads = {}
+        self._terminate = Event()
 
-        self.ctx = ctx
-        self.cmd_sock = self.ctx.socket(zmq.REP)
-        self.cmd_sock.bind(f'tcp://*:{Ports.COMMAND}')
-        self.cmd_poller = zmq.Poller()
-        self.cmd_poller.register(self.cmd_sock, zmq.POLLIN | zmq.POLLOUT)
-        self.cmd_timeout = 1.0
-        self.sockets['cmd'] = self.cmd_sock
-
-        # Set up request handling.
-        self._request_handlers = {'get' : self._handle_get,
-                                  'set' : self._handle_set,
-                                  'call': self._handle_call}
-
-        # Open camera, and prepare to publish frames.
-        self.cam = Camera()
-        self.frame_publisher = FramePublisher(self.ctx, self.cam)
-        self.threads['frame_publisher'] = self.frame_publisher
-
-        self._started = False
-        self._running = False
-        self._terminate = False
-
-        self.run()
+        if start:
+            self.run()
 
 
     #--------------------------------------------------------------------------#
     # Main event loop
 
-    def start(self):
-        pass
+
+    def bind(self):
+
+        logging.info('Opening network connections.')
+
+        # Open client connection.
+        ctx = zmq.Context.instance()
+        cmd = ctx.socket(zmq.REP)
+        cmd.bind(f'tcp://*:{Ports.CONTROL}')
+
+        # Setup a poller.
+        cmd_poller = zmq.Poller()
+        cmd_poller.register(cmd, zmq.POLLIN | zmq.POLLOUT)
+
+        # Store sockets and poller(s), attributes.
+        self.context = ctx
+        self.cmd = cmd
+        self.cdm_poller = cmd_poller
+        self.sockets['cmd'] = cmd
+        self.pollers['cmd'] = cmd_poller
+
+
+    def disconnect(self):
+
+        for name, sock in self.sockets.items():
+            sock.close()
+            poller = self.pollers.get(name, None)
+            if poller:
+                poller.unregister(sock)
+        self.sockets.clear()
+        self.pollers.clear()
+
+
+    def close(self) -> str:
+
+        # Close network connections, kill threads, etc.
+        self._terminate.set()
+        self.disconnect()
+        for name, thread in self.threads.items():
+            pass
+
+
 
 
     def run(self):
@@ -83,28 +115,25 @@ class MesoServer:
 
         call: {'action' : 'call',
                'target' : '',
-               'key'    : 'close',
+               'fn'    : 'close',
                'args'   : [5.0],
                'kw'     : {'some_key' : 55})}
 
 
         """
 
-        if self._started:
-            print('Server has already run.')
-            return
-
-        print('Server ready.', flush=True)
+        if self._running:
+            msg = 'Client is already running.'
+            logging.error(msg)
+            raise RuntimeError(msg)
+        self._running = True
 
         # Alias
-        sock = self.cmd_sock
-        poller = self.cmd_poller
-        timeout = self.cmd_timeout
+        cmd = self.sockets['client']
+        poller = self.sockets['cmd']
+        poller_timout = 1 * 1000
 
-        self._started = True
-        self._running = True
-        self._terminate = False
-        while not self._terminate:
+        while not self._terminate.is_set():
 
             # Check for stdin.
             line = read_stdin().strip()
@@ -113,35 +142,11 @@ class MesoServer:
                 continue
 
             # Check for client requests.
-            ready = dict(poller.poll(timeout * 1000))
-            if not (sock in ready and ready[sock] == zmq.POLLIN):
-                continue
-            req = sock.recv_json()
-            self._handle_request(req)
-            continue
+            poll_result = dict(poller.poll(poller_timout))
+            if cmd in poll_result and cmd[poll_result] == zmq.POLLIN:
+                self._handle_cmd()
 
-
-        # Finally, shut everything down neatly.
-        self._shutdown()
-
-
-    def close(self) -> str:
-            self._terminate = True
-
-
-    def _shutdown(self) -> None:
-        """Shut everything down neatly."""
-        print('Closing sockets.')
-        for sock in self.sockets.values():
-            sock.close()
-        print('Closing threads.')
-        for thread in self.threads.values():
-            thread.close()
-        self.cam.close()
-        time.sleep(1.5)
-        self.ctx.term()
         self._running = False
-        print('Server closed.')
 
 
     #--------------------------------------------------------------------------#
@@ -152,9 +157,8 @@ class MesoServer:
         """
         Return through here to utilize verbosity.
         """
-        if self.verbose:
-            print(f'Sending reply: {rep}')
-        self.cmd_sock.send_json(rep)
+        logging.debug(f'Sending reply: {rep}')
+        self.client_sock.send_json(rep)
         time.sleep(0.005)
 
 
@@ -176,16 +180,18 @@ class MesoServer:
     # Receiving methods
 
 
-    def _handle_request(self, req: Dict) -> None:
+    def _handle_cmd(self):
 
-        if self.verbose:
-            print(f'Received request: {req}', flush=True)
+        logging.debug(f'Received request: {req}', flush=True)
+        msg = self.cmd.recv_json()
 
-        rtype = req.get('type', None)
-        if rtype not in self._request_handlers.keys():
-            self.send_error(RuntimeError(f'invalid request type {rtype}.'))
+        #rtype = req.get('type', None)
+        #if rtype not in self._request_handlers.keys():
+            #self.send_error(RuntimeError(f'invalid request type {rtype}.'))
+        time.sleep(0.005)
+        self.cmd.send_json({'return' : 'hello there'})
 
-        self._request_handlers[rtype](req)
+        #self._request_handlers[rtype](req)
 
 
 
@@ -231,12 +237,10 @@ class MesoServer:
     #--------------------------------------------------------------------------#
     # etc.
 
+if __name__ == '__main__':
 
-def start_server():
-    server = MesoServer()
-    server_thread = Thread(target=server.run)
-    server_thread.start()
-
-
-
-
+    s = MesoServer()
+    try:
+        s.run()
+    except:
+        s.close()

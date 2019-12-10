@@ -1,4 +1,4 @@
-import queue as _queue
+import queue
 from queue import Queue
 from threading import Lock, Thread
 import time

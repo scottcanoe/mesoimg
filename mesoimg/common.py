@@ -26,9 +26,7 @@ __all__ = [
     'PathLike',
 
     # Threading, multiprocessing, etc.
-    'clear_q',
-    'put_q',
-    'read_q',
+    'clear_queue',
 
     # Filesystem and data I/O.
     'pathlike',
@@ -73,42 +71,13 @@ PathLike = Union[str, pathlib.Path]
 # Threading, multiprocesing, etc.
 
 
-def clear_q(q: queue.Queue) -> None:
+def clear_queue(q: queue.Queue) -> None:
     """
     Empty a queue.
     """
     while not q.empty():
         q.get()
 
-
-def put_q(q: queue.Queue, elt: Any) -> None:
-    """
-    Like Queue.put(), but will pop an element prior to put if
-    queue is full.
-    """
-    if q.full():
-        q.get()
-    q.put(elt)
-
-
-def read_q(q: queue.Queue, replace: bool = False) -> List:
-    """
-    Read a queue's contents by popping its elements until empty.
-    If ``replace``  is ``True``, the elements will be pushed back
-    onto the queue prior to returning.
-    """
-
-    # Pop the elements into a list.
-    lst = []
-    while not q.empty():
-        lst.append(q.get())
-
-    # Optionally put the elements back into the queue.
-    if replace:
-        for i, elt in enumerate(lst):
-            q.put(elt)
-
-    return lst
 
 
 #------------------------------------------------------------------------------#
@@ -135,6 +104,12 @@ def read_stdin(timeout: float = 0.0) -> str:
     if select.select([sys.stdin], [], [], timeout)[0]:
         return sys.stdin.readline()
     return ''
+
+
+def write_stdout(chars: str, flush=True) -> None:
+    sys.stdout.write(chars)
+    if flush:
+        sys.stdin.flush()
 
 
 def read_json(path: PathLike) -> dict:

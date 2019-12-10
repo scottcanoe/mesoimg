@@ -17,12 +17,14 @@ class FrameBuffer(io.BytesIO):
 
     """
 
-
-
-    def __init__(self, cam: 'Camera'):
+    def __init__(self,
+                 cam: 'Camera',
+                 contiguous: bool = True,
+                 ):
         super().__init__()
 
         self._cam = cam
+        self._contiguous = contiguous
 
         # Initialize reshaping parameters.
         # In raw input mode, the sensor sends us data with resolution
@@ -78,13 +80,15 @@ class FrameBuffer(io.BytesIO):
             msg = f"Expected {self._n_bytes_in} bytes, received {bytes_available}"
             raise IOError(msg)
 
-        # Reshape the data from the buffer, and send it to the camera.
+        # Reshape the data from the buffer, and send the data back
+        # to the camera for further handling.
         data = np.frombuffer(self.getvalue(), dtype=np.uint8)
         data = data.reshape(self._in_shape)[self._out_slice]
-        data = as_contiguous(data)
-        self._cam._frame_callback(data)
+        if self._contiguous:
+            data = np.ascontiguousarray(data)
+        self._cam._write_callback(data)
 
-        # Finally, rewind the buffer and return as usual.
+        # Finally, rewind the buffer and truncate.
         self.truncate(0)
         self.seek(0)
         return n_bytes
@@ -98,6 +102,7 @@ class FrameBuffer(io.BytesIO):
         self.flush()
         self.truncate(0)
         self.seek(0)
+        self.data = None
         super().close()
 
 

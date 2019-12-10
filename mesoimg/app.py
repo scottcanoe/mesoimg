@@ -1,5 +1,7 @@
 import contextlib
+from enum import IntEnum, unique
 import json
+import logging
 import os
 from pathlib import Path
 import time
@@ -14,7 +16,9 @@ __all__ = [
     'read_procinfo',
     'write_procinfo',
     'delete_procinfo',
+    'find_from_procinfo',
     'kill_from_procinfo',
+    'Ports',
 ]
 
 
@@ -60,31 +64,45 @@ def delete_procinfo(fname: str) -> Dict:
         path.unlink()
 
 
-def kill_from_procinfo(fname: str) -> bool:
+def find_from_procinfo(fname: str) -> Optional[psutil.Process]:
 
     try:
         info = read_procinfo(fname)
     except FileNotFoundError:
-        print('No procinfo for "{fname}".')
-        return False
-
-    pid = info['pid']
-    if pid == os.getpid():
-        print('Camera is owned by this process. Will not kill current process.')
-        return False
+        return
 
     try:
-        proc = psutil.Process(pid)
+        proc = psutil.Process(info['pid'])
     except psutil.NoSuchProcess:
-        print('Process no longer exists. Deleting procinfo file.')
         delete_procinfo(fname)
-        return False
+        return
 
     if proc.create_time() != info['create_time']:
-        print('Create times do not match. Not killing process.')
-        return False
+        return
 
-    print(f'Killing process (pid={pid}).')
+    return proc
+
+
+def kill_from_procinfo(fname: str) -> None:
+
+    proc = find_from_procinfo(fname)
+    if proc is None:
+        logging.info(f"No existing process found matching info for '{fname}'")
+        return
+
+    logging.info(f'Killing process (pid={proc.pid}).')
     proc.kill()
-    return True
+
+
+
+@unique
+class Ports(IntEnum):
+    """
+    Enum for holding port numbers.
+    """
+    COMMAND    = 7000   # req/rep (rep on server side)
+    CONSOLE    = 7001   # req/rep (rep on server side)
+    FRAME_PUB  = 7004   # pub/sub
+    STATUS_PUB = 7005   # pub/sub
+
 

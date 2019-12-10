@@ -18,9 +18,8 @@ from typing import (Any,
                     Union)
 import queue
 import numpy as np
-import picamera
-from picamera import PiCamera
 import zmq
+from mesoimg.app import kill_from_procinfo, write_procinfo
 from mesoimg.arrays import Frame
 from mesoimg.buffers import FrameBuffer
 from mesoimg.common import *
@@ -88,12 +87,13 @@ class Camera:
         self._frame_clock = Clock()
 
         # Threading and synchronization
-        self.new_frame = Condition()
         self.frame_q = queue.Queue(maxsize=10)
-        self.status_q = queue.Queue(maxsize=10)
+        self.new_frame = Condition()
 
         # Create the picamera instance with defaults.
         self._init_cam()
+
+
 
 
     #--------------------------------------------------------------------------#
@@ -198,6 +198,10 @@ class Camera:
     #--------------------------------------------------------------------------#
     # Extra properties
 
+    @property
+    def streaming(self) -> bool:
+        """Whether the camera is busy recording data."""
+        return self._cam.recording
 
     @property
     def channels(self) -> str:
@@ -208,11 +212,6 @@ class Camera:
         if self.streaming:
             raise RuntimeError('cannot modify resolution while streaming.')
         self._channels = validate_channels(ch)
-
-    @property
-    def streaming(self) -> bool:
-        """Whether the camera is busy recording data."""
-        return self._cam.recording
 
     @property
     def frame(self) -> Optional[Frame]:
@@ -246,8 +245,7 @@ class Camera:
         """
 
         """
-
-        from mesoimg.app import kill_from_procinfo, write_procinfo
+        from picamera import PiCamera, PiCameraMMALError
 
         resolution  = _DEFAULTS['resolution']
         framerate   = _DEFAULTS['framerate']
@@ -260,7 +258,7 @@ class Camera:
                 self._cam = PiCamera(resolution=resolution,
                                      framerate=framerate,
                                      sensor_mode=sensor_mode)
-            except picamera.exc.PiCameraMMALError:
+            except PiCameraMMALError:
                 kill_from_procinfo('picamera')
                 time.sleep(1)
                 self._cam = PiCamera(resolution=resolution,
@@ -275,17 +273,16 @@ class Camera:
             time.sleep(1.0)
 
 
-    def clear(self) -> None:
+    def clear_frame_attrs(self) -> None:
 
         if self.streaming:
-            raise RuntimeError("Cannot clear camera while streaming. ")
+            raise RuntimeError("Cannot clear frame attrs while streaming.")
 
         with self.frame_lock:
             self._frame = None
             self._frame_counter = 0
             self._frame_clock = Clock()
-            clear_q(self.frame_q)
-            clear_q(self.status_q)
+        clear_queue(self.frame_q)
 
 
     def close(self) -> None:
@@ -313,23 +310,17 @@ class Camera:
                 use_video_port: bool = True,
                 ) -> None:
 
-        if self.streaming:
-            raise RuntimeError('Cannot capture while streaming in progress.')
-
-        self.clear()
+        self.clear_frame_attrs()
         buf = FrameBuffer(self)
         self._cam.capture(buf, 'rgb', use_video_port=True)
         if out:
             fn = get_writer(out)
-            fn(out, self.frame.data)
+            fn(out, self._frame)
 
 
     def start_streaming(self) -> None:
 
-        if self.streaming:
-            raise RuntimeError('Camera is already streaming.')
-
-        self.clear()
+        self.clear_frame_attrs()
         buf = FrameBuffer(self)
         self._cam.start_recording(buf, 'rgb')
 
@@ -346,16 +337,6 @@ class Camera:
         self._cam.stop_recording()
 
 
-    def stream_for(self, duration: float) -> None:
-        self.start_streaming()
-        self.wait_streaming(duration)
-        self.stop_streaming()
-
-
-    def stream_until(self, event: Any) -> None:
-        pass
-
-
     #--------------------------------------------------------------------------#
     # utilities
 
@@ -369,45 +350,30 @@ class Camera:
             setattr(self, key, val)
 
 
-    #-------------------------------------------------------------------------#
+    #--------------------------------------------------------------------------#
     # Private/protected methods
 
-
-    def _frame_callback(self, data: np.ndarray) -> None:
+    def _write_callback(self, data: np.ndarray) -> None:
+        pass
 
         """
         Called by the frame buffer upon new frame being produced.
         """
 
-        # Update frame and its counters.
+        # Finalize the new frame.
         with self.frame_lock:
             index, timestamp = self._frame_counter, self._frame_clock()
             self._frame_counter += 1
             self._frame = Frame(data, index=index, timestamp=timestamp)
 
-        # Update frame and status queues.
-        put_q(self.frame_q, self._frame)
-        put_q(self.status_q, self.status)
+        # Push new frame onto the queue, dropping one if necessary.
+        if self.frame_q.full():
+            self.frame_q.get()
+        self.frame_q.put(self._frame)
+
+        # Notify listeners that there's a new frame.
         with self.new_frame:
             self.new_frame.notify_all()
-
-
-    def test(self, duration: float = 2.0, interval: float = 1.0) -> None:
-
-        self._reset()
-        self._countdown_timer = CountdownTimer(duration)
-
-        self._cam.start_recording(self._frame_buffer, 'rgb')
-        while True:
-            self._cam.wait_recording(interval)
-            if self._countdown_timer() <= 0:
-                break
-        self._cam.stop_recording()
-
-        n_frames = self._frame_counter - 1
-        fps = n_frames / duration
-        reprt = f'Produced {n_frames} frames in {duration} secs. (fps={fps})'
-        print(report, flush=True)
 
 
     def __repr__(self):
