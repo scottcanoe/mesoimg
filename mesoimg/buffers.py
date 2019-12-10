@@ -1,13 +1,32 @@
 import io
 from typing import Tuple
 import numpy as np
-from picamera.array import raw_resolution
-from mesoimg.common import as_contiguous
 
 
 __all__ = [
     'FrameBuffer',
 ]
+
+
+
+def raw_resolution(resolution, splitter=False):
+    """
+    Round a (width, height) tuple up to the nearest multiple of 32 horizontally
+    and 16 vertically (as this is what the Pi's camera module does for
+    unencoded output).
+
+    From ``picamera.array``, places here to avoid more picamera imports.
+
+    """
+
+    width, height = resolution
+    if splitter:
+        fwidth = (width + 15) & ~15
+    else:
+        fwidth = (width + 31) & ~31
+    fheight = (height + 15) & ~15
+    return fwidth, fheight
+
 
 
 class FrameBuffer(io.BytesIO):
@@ -84,7 +103,7 @@ class FrameBuffer(io.BytesIO):
         # to the camera for further handling.
         data = np.frombuffer(self.getvalue(), dtype=np.uint8)
         data = data.reshape(self._in_shape)[self._out_slice]
-        if self._contiguous:
+        if self._contiguous and not data.flags.c_contiguous:
             data = np.ascontiguousarray(data)
         self._cam._write_callback(data)
 

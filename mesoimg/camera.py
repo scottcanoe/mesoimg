@@ -211,7 +211,7 @@ class Camera:
     def channels(self, ch: str) -> None:
         if self.streaming:
             raise RuntimeError('cannot modify resolution while streaming.')
-        self._channels = validate_channels(ch)
+        self._channels = self._validate_channels(ch)
 
     @property
     def frame(self) -> Optional[Frame]:
@@ -219,7 +219,7 @@ class Camera:
         return self._frame
 
     @property
-    def out_shape(self) -> Tuple[int]:
+    def frame_shape(self) -> Tuple[int]:
         """
         Get the frame shape in array dimension order.
         The `channels` dimension will be omitted in single-channel mode.
@@ -374,6 +374,13 @@ class Camera:
         # Notify listeners that there's a new frame.
         with self.new_frame:
             self.new_frame.notify_all()
+
+
+    def _validate_channels(ch: str) -> str:
+
+        if ch.lower() not in ('r', 'g', 'b', 'rgb'):
+            raise ValueError(f"unsupported channels '{ch}'")
+        return ch.lower()
 
 
     def __repr__(self):

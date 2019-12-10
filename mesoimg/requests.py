@@ -8,6 +8,7 @@ __all__ = [
     'Get',
     'Set',
     'Call',
+    'Exec',
     'Response',
 ]
 
@@ -30,8 +31,6 @@ class Request(abc.ABC):
     def __repr__(self) -> str:
         parts = [f'{name}={getattr(self, name)}' for name in self._fields]
         return f'<{self._action.upper()}: ' + ', '.join(parts) + '>'
-
-
 
 
     @staticmethod
@@ -91,11 +90,21 @@ class Call(Request):
         self.kw = kw if kw else {}
 
 
+class Exec(Request):
+
+    _action: ClassVar[str] = 'exec'
+    _fields = ('text',)
+
+    def __init__(self, text: str):
+        self.text = text
+
+
 
 _REQUEST_CLASSES = {\
-    'get'    : Get,
-    'set'    : Set,
-    'call'   : Call
+    'get'  : Get,
+    'set'  : Set,
+    'call' : Call,
+    'exec' : Exec,
 }
 
 
@@ -111,6 +120,7 @@ class Response:
         self.result = result
         self.stdout = stdout
         self.error = error
+
 
     def __repr__(self) -> str:
         return f'<Response: result={self.result}, ' + \

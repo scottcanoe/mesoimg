@@ -1,20 +1,19 @@
 import datetime
 import os
-from pprint import pprint
 import sys
-from threading import Event, Lock, Thread
+from threading import Condition, Event, Lock, Thread
 import time
 from time import perf_counter as clock
-from typing import Any, Dict, List, Union
+import traceback
+from typing import Any, Dict, List, Optional, Union
 import glom
 import numpy as np
 import zmq
 from mesoimg.app import userdir, find_from_procinfo, kill_from_procinfo, Ports
 from mesoimg.command_line import *
 from mesoimg.common import *
-from mesoimg.camera import *
+#from mesoimg.camera import *
 from mesoimg.messaging import *
-from mesoimg.outputs import *
 import psutil
 
 
@@ -29,21 +28,6 @@ __all__ = [
 
 
 
-def start_console() -> None:
-
-    now = str(datetime.datetime.now())
-    parts = now.split(':')
-    now = ':'.join(parts[0:2])
-
-    msg = f'MesoServer ({now}) pid = {os.getpid()}'
-    print(msg)
-    prompt()
-
-
-def prompt() -> None:
-    sys.stdout.write('> ')
-    sys.stdout.flush()
-
 
 class MesoServer:
 
@@ -51,223 +35,211 @@ class MesoServer:
     _running: bool = False
 
 
-    def __init__(self,
-                 host: str = '*',
-                 start: bool = True,
-                 ):
+    def __init__(self, host: str = '*'):
 
         logging.info('Initializing server.')
 
         # Networking.
+        self.ctx = zmq.Context()
         self.sockets = {}
-        self.pollers = {}
-        self.bind()
 
         # Conccurrency.
         self.lock = Lock()
         self.threads = {}
-        self._terminate = Event()
+        self._stop_requested = Event()
+        self._stopped = Event()
 
-        # Set up auxilliary namespace for command line usage.
-        ns = {}
-        ns['bind'] = self.bind
-        ns['disconnect'] = self.disconnect
-        ns['close'] = self.close
-
-        self._ns = ns
-        if start:
-            self.run()
+        self._init()
 
 
     #--------------------------------------------------------------------------#
     # Main event loop
 
 
-    def bind(self):
+    def _init(self):
 
-        logging.info('Opening network connections.')
+        self._stop_requested.clear()
+        self._stopped.clear()
+
+        self._running = False
+        self._terminate = False
+        self._exit = False
+
+        # Set up auxilliary namespace for command line usage.
+        ns = {}
+        ns['echo'] = self.echo
+        ns['run'] = self.run
+        ns['close'] = self.close
+        ns['exit'] = self.close
+
+        self._ns = ns
+        self._init_sockets()
+        self.start_console()
+
+
+    def _init_sockets(self) -> None:
+
+        logging.info('Initializing sockets.')
 
         # Open client connection.
         ctx = zmq.Context.instance()
-        cmd = ctx.socket(zmq.REP)
-        cmd.bind(f'tcp://*:{Ports.COMMAND}')
-
-        # Setup a poller.
-        cmd_poller = zmq.Poller()
-        cmd_poller.register(cmd, zmq.POLLIN | zmq.POLLOUT)
+        com = ctx.socket(zmq.REP)
+        com.bind(f'tcp://*:{Ports.COMMAND}')
+        poller = zmq.Poller()
+        poller.register(com, zmq.POLLIN | zmq.POLLOUT)
+        setsockattr(com, 'poller', poller)
 
         # Store sockets and poller(s), attributes.
-        self.context = ctx
-        self.cmd = cmd
-        self.cdm_poller = cmd_poller
-        self.sockets['cmd'] = cmd
-        self.pollers['cmd'] = cmd_poller
+        self.com = com
+        self.sockets['com'] = com
 
 
-    def disconnect(self):
 
-        for name, sock in self.sockets.items():
-            sock.close()
-            poller = self.pollers.get(name, None)
-            if poller:
-                poller.unregister(sock)
-        self.sockets.clear()
-        self.pollers.clear()
+    def close(self) -> None:
 
+        logging.info('Closing server.')
 
-    def close(self) -> str:
-
-        # Close network connections, kill threads, etc.
-        self._terminate.set()
-        self.disconnect()
-        for name, thread in self.threads.items():
-            pass
-        print('')
-
+        # Stop the event loop, and wait for it to finish.
+        self._terminate = True
 
 
     def run(self):
-        """
-
-
-        get:  {'action' : 'get',
-               'target' : 'cam',
-               'key'    : 'exposure_speed'}
-
-        set:  {'action' : 'set',
-               'target' : 'cam',
-               'key'    : 'exposure_mode',
-               'val'    : 'off'}
-
-        call: {'action' : 'call',
-               'target' : '',
-               'fn'    : 'close',
-               'args'   : [5.0],
-               'kw'     : {'some_key' : 55})}
-
-
-        """
 
         if self._running:
-            msg = 'Client is already running.'
-            logging.warning(msg)
+            print('Already running...')
             return
         self._running = True
+        self._terminate = False
 
         # Alias
-        cmd = self.sockets['cmd']
-        poller = self.pollers['cmd']
-        poller_timout = 0.1 * 1000
+        com = self.sockets['com']
+        poller = getsockattr(com, 'poller')
+        com_timout = 0.1 * 1000
 
-        logging.info('Ready for commands.')
+        logging.info('Starting event loop.')
+        write_stdout('> ')
+        while not self._terminate:
 
-        # Setup CLI.
-        start_console()
-
-        while not self._terminate.is_set():
+            # Check for client requests.
+            socks = dict(poller.poll(com_timout))
+            if socks.get(com, None) == zmq.POLLIN:
+            #if com in socks and socks[com] == zmq.POLLIN:
+                self.handle_com()
 
             # Check for stdin.
             if poll_stdin():
                 self.handle_stdin()
 
-            # Check for client requests.
-            res = dict(poller.poll(poller_timout))
-            if cmd in res and res[cmd] == zmq.POLLIN:
-                self.handle_cmd()
-
+        logging.info('Event loop stopped.')
         self._running = False
+        self.cleanup()
+
+
+
+    def cleanup(self) -> None:
+
+        logging.info('Closing sockets.')
+        if self._running:
+            msg = "Stop event loop before closing sockets."
+            logging.warning(msg)
+            return msg
+
+        # Wait for event loop to stop.
+        for sock in self.sockets.values():
+            sock.close()
+
+
+    def reset(self):
+        self.close()
+        time.sleep(0.1)
+        self._init_sockets()
 
 
 
     #--------------------------------------------------------------------------#
     # Receiving methods
 
+
     def handle_stdin(self) -> None:
+        """
+        Ready command line input, and execute it.
+        """
         s = read_stdin().rstrip()
-        res, out, err = execute(s, globals(), self._ns)
+        result, stdout, error = execute(s, globals(), self._ns)
 
+        if error:
+            if error.endswith('\n'):
+                error = error[:-1]
+            print(error)
+        elif result:
+            pprint(result)
 
-        if err:
-            if err.endswith('\n'):
-                err = err[:-1]
-            print(err)
-        elif res:
-            pprint(res)
-
-        prompt()
+        write_stdout('> ')
         return
 
 
-    def handle_cmd(self) -> None:
-
-
-        req = self.cmd.recv_json()
+    def handle_com(self) -> None:
+        """
+        Read the client's request, and figure out what to do with it.
+        """
+        req = self.com.recv_json()
         logging.debug(f'Received request: {req}')
 
         # Small validity check.
         action = req.get('action', None)
-        if action not in ('get', 'set', 'call'):
-            err = repr(RuntimeError(f'Unsupported action: {action}'))
-            self.cmd.send_json({'error' : repr(err)})
-            time.sleep(0.005)
+        if action not in ('get', 'set', 'call', 'exec'):
+            error = repr(RuntimeError(f'Unsupported action: {action}'))
+            resp = dict(action=action, stdout='', error=error)
+            self.com.send_json(resp)
             return
+
+        result = None
+        stdout = ''
+        error = ''
 
         try:
 
             if action == 'get':
-                val = glom.glom(self, req['key'])
+                result = glom.glom(self, req['key'])
 
             elif action == 'set':
                 glom.assign(self, req['key'], req['val'])
 
-            else:
-
+            elif action == 'call':
                 fn = glom.glom(self, req['key'])
-                val = fn(*req['args'], **req['kw'])
-                self.send_return(val)
+                result = fn(*req['args'], **req['kw'])
 
-            except Exception as exc:
-                self.send_error(exc)
-
+            elif action == 'exec':
+                _, stdout, error = execute(req['text'], globals(), locals())
 
         except:
-            err = ''.join(traceback.format_exception(*sys.exc_info()))
+            error = ''.join(traceback.format_exception(*sys.exc_info()))
+
+        resp = dict(result=result, stdout=stdout, error=error)
+        logging.debug(f'Returning: {resp}')
+        self.com.send_json(resp)
 
 
+    def start_console(self) -> None:
 
-    #--------------------------------------------------------------------------#
-    # Sending methods
+        now = str(datetime.datetime.now())
+        parts = now.split(':')
+        now = ':'.join(parts[0:2])
 
+        msg = f'MesoServer ({now}) pid = {os.getpid()}'
+        print(msg)
+        write_stdout('> ')
 
-    def send_(self, rep: Dict) -> None:
-        """
-        Return through here to utilize verbosity.
-        """
-        logging.debug(f'Sending reply: {rep}')
-        self.client_sock.send_json(rep)
-        time.sleep(0.005)
-
-
-    def send_return(self, val: Any = None) -> None:
-
-        rep = {'type' : 'return', 'val' : val}
-        self.send(rep)
-
-
-    def send_error(self, exc: Exception) -> None:
-
-        msg = str(repr(exc))
-        print('ERROR: ' + msg, flush=True)
-        rep = {'type' : 'error', 'val' : msg}
-        self.send(rep)
 
     #--------------------------------------------------------------------------#
     # etc.
 
+    def echo(self, val=None):
+        return val
+
+
 if __name__ == '__main__':
 
-    s = MesoServer()
-    try:
-        s.run()
-    except:
-        s.close()
+
+    server = MesoServer()
+    server.run()

@@ -1,4 +1,5 @@
 from pathlib import Path
+import sys
 from threading import Condition, Event, Lock, Thread
 import time
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -12,13 +13,115 @@ from mesoimg.parsing import *
 from mesoimg.requests import *
 
 import logging
-logfile = userdir() / 'logs' / 'log.txt'
-logging.basicConfig(filename=logfile, level=logging.DEBUG)
+#logfile = userdir() / 'logs' / 'log.txt'
+logging.basicConfig(level=logging.DEBUG)
 
 
 __all__ = [
     'MesoClient',
 ]
+
+
+
+class CommandSocket:
+
+
+
+    def __init__(self,
+                 sock_type: int,
+                 host: str,
+                 port: Union[int, str],
+                 binds: bool = False,
+                 timeout: float = 10.0,
+                 ):
+
+        self.socket = None
+        self.poller = None
+        self._sock_type = sock_type
+        self._host = host
+        self._port = port
+        self._binds = binds
+        self.timeout = timeout
+        self._init_socket()
+
+
+    def _init_socket(self) -> None:
+
+        # Create and bind the socket.
+        ctx = zmq.Context.instance()
+        self.socket = ctx.socket(self._sock_type)
+        addr = f'tcp://{self._host}:{self._port}'
+        if self._binds:
+            self.socket.bind(addr)
+        else:
+            self.socket.connect(addr)
+
+        # Setup a poller.
+        self.poller = zmq.Poller()
+        self.poller.register(self.socket)
+        self.in_poller = zmq.Poller()
+        self.in_poller.register(self.socket, zmq.POLLIN)
+
+
+    def close(self):
+        self.socket.close()
+        for p in [self.poller, self.in_poller]:
+            try:
+                p.unregister(self.socket)
+            except:
+                pass
+
+    def reset(self):
+
+        self.close()
+        time.sleep(0.005)
+        self._init_socket()
+
+
+    def send(self, req: Request, **kw) -> Optional[Response]:
+
+        """
+        Send a request to the server, and wait for a response.
+        """
+
+        logging.debug(f'Sending request: {req}')
+        sock = self.socket
+        data = req.asdict() if isinstance(req, Request) else req
+        sock.send_json(data)
+        return self.recv(**kw)
+
+
+    def recv(self, **kw) -> Response:
+        timeout = kw.get('timeout', self.timeout)
+        info = dict(self.in_poller.poll(timeout))
+        if self.socket in info:
+            data = self.socket.recv_json()
+            resp = Response(**data)
+            logging.debug(f'Received: {resp}')
+            return resp
+
+        msg  = 'No message received within timeout period. '
+        msg += 'Socket is still in receiving state.'
+        logging.warning(msg)
+
+
+    def get(self, key, **kw) -> Optional[Response]:
+        return self.send(Get(key), **kw)
+
+
+    def set(self, key, val, **kw) -> Optional[Response]:
+        return self.send(Set(key, val), **kw)
+
+
+    def call(self, key, *args, **kw) -> Optional[Response]:
+        timeout = kw.pop('timeout', self.timeout)
+        return self.send(Call(key, args, kw), timeout=timeout)
+
+
+    def exec(self, text, **kw) -> Optional[Response]:
+        timeout = kw.pop('timeout', self.timeout)
+        return self.send(Exec(text), **kw)
+
 
 
 class MesoClient:
@@ -27,118 +130,77 @@ class MesoClient:
 
     def __init__(self, host: str = 'pi-meso.local'):
 
-        logging.info('Initializing client.')
-
         # Networking.
         self._host = host
         self.sockets = {}
-        self.pollers = {}
-        self.connect()
+
+        # Connect command socket.
+        self._init()
 
         # Conccurrency.
-        self.threads = {}
+        self._threads = {}
 
 
-    def connect(self):
+    def _init(self) -> None:
+        logging.info('Initializing client.')
+        self._init_sockets()
 
-        logging.info('Opening connections.')
+
+    def _init_sockets(self) -> None:
+
+        logging.info('Initializing sockets.')
 
         # Connect to server.
-        ctx = zmq.Context.instance()
-        cmd = ctx.socket(zmq.REQ)
-        cmd.connect(f'tcp://{self._host}:{Ports.COMMAND}')
+        self.ctx = zmq.Context()
+        self.com = CommandSocket(zmq.REQ, self._host, Ports.COMMAND)
 
-        # Setup a poller.
-        cmd_poller = zmq.Poller()
-        cmd_poller.register(cmd, zmq.POLLIN | zmq.POLLOUT)
-
-        # Store sockets and poller(s), attributes.
-        self.context = ctx
-        self.cmd = cmd
-        self.cdm_poller = cmd_poller
-        self.sockets['cmd'] = cmd
-        self.pollers['cmd'] = cmd_poller
-
-
-    def disconnect(self):
-
-        for name, sock in self.sockets.items():
-            sock.close()
-            poller = self.pollers.get(name, None)
-            if poller:
-                poller.unregister(sock)
-        self.sockets.clear()
-        self.pollers.clear()
+        # Store sockets.
+        self.sockets['com'] = self.com
 
 
     def close(self):
-        self.disconnect()
+        logging.info('closing client')
+        self.close_sockets()
 
 
-    def send(self, req: Dict) -> None:
-        """
-        Final method in pipeline for sending requests to the server.
-        """
-        logging.debug(f'Sending request: {req}')
-        self.cmd.send_json(req)
+    def close_sockets(self):
+        logging.info('closing sockets')
+        for name, sock in self.sockets.items():
+            sock.close()
 
 
-    def send_get(self, key: str) -> Any:
-        """
-        Main gateway for retrieving attributes from the server's side. The server
-        instance is the target (implicitly). Use this method to ensures that that the
-        request is well-formed. Provided as a convenience.
-
-        Get requests have the following structure:
-          - 'action' : str     Aalways 'get'.
-          - 'key' : str      Name of attribute to set.
-
-        """
-        req = {'action' : 'get',
-               'key'    : key}
-        return self.send(req)
+    def reset(self):
+        self.close()
+        self._init()
 
 
-    def send_set(self, key: str, val: Any) -> Any:
-        """
-        Main gateway for setting attributes on the server side. The server instance
-        is the target (implicitly). Use this method to ensures that that the request
-        is well-formed. Provided as a convenience.
-
-        Set requests have the following structure:
-          - 'action' : str     Always 'set'.
-          - 'key' : list     Name of attribute to set.
-          - 'val' : dict     Attribute's new value.
-
-        """
-
-        req = {'action' : 'set',
-               'key' : key,
-               'val' : val}
-        return self.send(req)
-
-
-    def send_call(self, key: str, *args, **kw) -> Any:
-
-        """
-        Main gateway for calling methods on the server side. The server instance
-        is the target (implicitly). Use this method to ensures that that the request
-        is well-formed. Provided as a convenience.
-
-        Call requests have the following structure:
-          - 'action' : str   Always 'call'.
-          - 'key' : str      Name of callable.
-          - 'args' : list    A possibly empty list of positional arguments.
-          - 'kw' : dict      A possibly empty dictionary of keyword arguments.
-
-        """
-
-        req = {'action' : 'call',
-               'key'  : key,
-               'args' : args,
-               'kw'   : kw}
-        return self.send(req)
+    def reset_sockets(self):
+        self.close_sockets()
+        time.sleep(0.5)
+        self._init_sockets()
 
 
 
-c = MesoClient()
+if __name__ == '__main__':
+
+
+    def close():
+        return client.close()
+
+    def reset():
+        client.reset()
+
+    def close_sockets():
+        return client.close_sockets()
+
+    def reset_sockets():
+        client.reset_sockets()
+
+    def exit():
+        client.close()
+        sys.exit()
+
+    client = MesoClient(host='127.0.0.1')
+    com = client.com
+
+

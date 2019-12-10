@@ -32,6 +32,7 @@ __all__ = [
     'pathlike',
     'poll_stdin',
     'read_stdin',
+    'write_stdout',
     'read_json',
     'write_json',
     'read_text',
@@ -109,7 +110,7 @@ def read_stdin(timeout: float = 0.0) -> str:
 def write_stdout(chars: str, flush=True) -> None:
     sys.stdout.write(chars)
     if flush:
-        sys.stdin.flush()
+        sys.stdout.flush()
 
 
 def read_json(path: PathLike) -> dict:
@@ -307,7 +308,6 @@ def repr_secs(secs: float) -> str:
         return sign * secs * 1e9, 'nsec'
 
 
-
 _printer = PrettyPrinter()
 
 def pprint(obj: Any) -> None:
@@ -316,11 +316,4 @@ def pprint(obj: Any) -> None:
 
 def pformat(obj: Any) -> str:
     return _printer.pformat(obj)
-
-
-def validate_channels(ch: str) -> str:
-
-    if ch.lower() not in ('r', 'g', 'b', 'rgb'):
-        raise ValueError(f"invalid channel spec '{ch}'")
-    return ch.lower()
 
