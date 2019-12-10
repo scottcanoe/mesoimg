@@ -195,27 +195,5 @@ class MesoClient:
         self._init_sockets(reset=True)
 
 
-if __name__ == '__main__':
-
-
-    client = MesoClient(host='pi-meso.local')
-    cmd = client.cmd
-
-    close = client.close
-    close_sockets = client.close_sockets
-
-    reset = client.reset
-    reset_sockets = client.reset_sockets
-
-
-    def echo(obj=None):
-        cmd.call('echo', obj)
-
-
-    def exit():
-        client.close()
-        sys.exit()
-
-
 
 

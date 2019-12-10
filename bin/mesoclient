@@ -1,0 +1,31 @@
+#!/usr/bin/python
+import argparse
+import os
+os.environ['PYTHONINSPECT'] = 'TRUE'
+import sys
+from mesoimg.osutils import *
+from mesoimg.app import *
+from mesoimg.server import MesoServer
+
+
+
+client = MesoClient(host='pi-meso.local')
+cmd = client.cmd
+
+# Alias some stuff.
+close = client.close
+close_sockets = client.close_sockets
+
+reset = client.reset
+reset_sockets = client.reset_sockets
+
+
+def echo(obj=None):
+    cmd.call('echo', obj)
+
+
+def exit():
+    client.close()
+    sys.exit()
+
+
