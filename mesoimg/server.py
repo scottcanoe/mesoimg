@@ -8,11 +8,12 @@ import traceback
 from typing import Any, Dict, List, Optional, Union
 import glom
 import numpy as np
+from superjson import json
 import zmq
 from mesoimg.app import userdir, find_from_procinfo, kill_from_procinfo, Ports
 from mesoimg.command_line import *
 from mesoimg.common import *
-#from mesoimg.camera import *
+from mesoimg.camera import *
 from mesoimg.messaging import *
 import psutil
 
@@ -32,7 +33,9 @@ __all__ = [
 class MesoServer:
 
 
+    cam: Optional[Camera] = None
     _running: bool = False
+    _terminate: bool = False
 
 
     def __init__(self, host: str = '*'):
@@ -58,23 +61,35 @@ class MesoServer:
 
     def _init(self):
 
+        # Set flags.
         self._stop_requested.clear()
         self._stopped.clear()
-
         self._running = False
         self._terminate = False
-        self._exit = False
+
+        # Open networking.
+        self._init_sockets()
 
         # Set up auxilliary namespace for command line usage.
         ns = {}
+
+        # - server
+        ns['server'] = self
         ns['echo'] = self.echo
         ns['run'] = self.run
         ns['close'] = self.close
         ns['exit'] = self.close
 
+        # - camera
+        ns['cam'] = self.cam
+        ns['open_camera'] = self.open_camera
+        ns['close_camera'] = self.close_camera
+
+        # Start the console.
         self._ns = ns
-        self._init_sockets()
         self.start_console()
+
+
 
 
     def _init_sockets(self) -> None:
@@ -83,15 +98,15 @@ class MesoServer:
 
         # Open client connection.
         ctx = zmq.Context.instance()
-        com = ctx.socket(zmq.REP)
-        com.bind(f'tcp://*:{Ports.COMMAND}')
+        cmd = ctx.socket(zmq.REP)
+        cmd.bind(f'tcp://*:{Ports.COMMAND}')
         poller = zmq.Poller()
-        poller.register(com, zmq.POLLIN | zmq.POLLOUT)
-        setsockattr(com, 'poller', poller)
+        poller.register(cmd, zmq.POLLIN | zmq.POLLOUT)
+        setsockattr(cmd, 'poller', poller)
 
         # Store sockets and poller(s), attributes.
-        self.com = com
-        self.sockets['com'] = com
+        self.cmd = cmd
+        self.sockets['cmd'] = cmd
 
 
 
@@ -112,19 +127,19 @@ class MesoServer:
         self._terminate = False
 
         # Alias
-        com = self.sockets['com']
-        poller = getsockattr(com, 'poller')
-        com_timout = 0.1 * 1000
+        cmd = self.sockets['cmd']
+        poller = getsockattr(cmd, 'poller')
+        cmd_timout = 0.1 * 1000
 
         logging.info('Starting event loop.')
         write_stdout('> ')
         while not self._terminate:
 
             # Check for client requests.
-            socks = dict(poller.poll(com_timout))
-            if socks.get(com, None) == zmq.POLLIN:
-            #if com in socks and socks[com] == zmq.POLLIN:
-                self.handle_com()
+            socks = dict(poller.poll(cmd_timout))
+            if socks.get(cmd, None) == zmq.POLLIN:
+
+                self.handle_cmd()
 
             # Check for stdin.
             if poll_stdin():
@@ -152,7 +167,7 @@ class MesoServer:
     def reset(self):
         self.close()
         time.sleep(0.1)
-        self._init_sockets()
+        self._init()
 
 
 
@@ -178,11 +193,12 @@ class MesoServer:
         return
 
 
-    def handle_com(self) -> None:
+    def handle_cmd(self) -> None:
         """
         Read the client's request, and figure out what to do with it.
         """
-        req = self.com.recv_json()
+        j_req = self.cmd.recv_string()
+        req = json.loads(j_req)
         logging.debug(f'Received request: {req}')
 
         # Small validity check.
@@ -190,7 +206,7 @@ class MesoServer:
         if action not in ('get', 'set', 'call', 'exec'):
             error = repr(RuntimeError(f'Unsupported action: {action}'))
             resp = dict(action=action, stdout='', error=error)
-            self.com.send_json(resp)
+            self.cmd.send_json(resp)
             return
 
         result = None
@@ -217,7 +233,19 @@ class MesoServer:
 
         resp = dict(result=result, stdout=stdout, error=error)
         logging.debug(f'Returning: {resp}')
-        self.com.send_json(resp)
+
+        try:
+            j_resp = json.dumps(resp)
+        except Exception as exc:
+            error = ''.join(traceback.format_exception(*sys.exc_info()))
+            resp = dict(result=None, stdout='', error=error)
+            j_resp = json.dumps(resp)
+
+        self.cmd.send_string(j_resp)
+
+
+    #--------------------------------------------------------------------------#
+    # etc.
 
 
     def start_console(self) -> None:
@@ -231,8 +259,18 @@ class MesoServer:
         write_stdout('> ')
 
 
-    #--------------------------------------------------------------------------#
-    # etc.
+    def open_camera(self) -> None:
+
+        if self.cam and not self.cam.closed:
+            raise RuntimeError("camera already exists and is open.")
+
+        self.cam = Camera()
+        self._ns['cam'] = self.cam
+
+
+    def close_camera(self) -> None:
+        self.cam.close()
+
 
     def echo(self, val=None):
         return val

@@ -65,11 +65,6 @@ _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
     )
 
 
-def validate_channels(ch: str) -> str:
-    ch = ch.lower()
-    if ch not in ('r', 'g', 'b', 'rgb'):
-        raise ValueError(f'invalid channel spec "{ch}"')
-    return ch
 
 
 class Camera:
@@ -287,7 +282,7 @@ class Camera:
 
     def close(self) -> None:
         """Clear and close the picamera instance."""
-        self.clear()
+        self.clear_frame_attrs()
         self._cam.close()
 
 
@@ -376,7 +371,7 @@ class Camera:
             self.new_frame.notify_all()
 
 
-    def _validate_channels(ch: str) -> str:
+    def _validate_channels(self, ch: str) -> str:
 
         if ch.lower() not in ('r', 'g', 'b', 'rgb'):
             raise ValueError(f"unsupported channels '{ch}'")
