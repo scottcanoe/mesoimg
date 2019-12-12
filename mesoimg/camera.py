@@ -16,8 +16,9 @@ from typing import (Any,
                     Sequence,
                     Tuple,
                     Union)
-import queue
+
 import numpy as np
+import queue
 import zmq
 from mesoimg.app import kill_from_procinfo, write_procinfo
 from mesoimg.arrays import Frame
@@ -26,6 +27,11 @@ from mesoimg.common import *
 from mesoimg.timing import *
 from mesoimg.outputs import *
 
+try:
+    from picamera import PiCamera, PiCameraMMALError
+    HAS_PICAMERA = True
+except:
+    HAS_PICAMERA = False
 
 
 __all__ = [
@@ -240,6 +246,10 @@ class Camera:
         """
 
         """
+        if not HAS_PICAMERA:
+            raise OSError("No picamera.")
+
+
         from picamera import PiCamera, PiCameraMMALError
 
         resolution  = _DEFAULTS['resolution']
