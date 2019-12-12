@@ -12,6 +12,10 @@ import zmq
 from mesoimg.arrays import Frame
 
 
+logger = logging.getLogger('camera')
+
+
+
 __all__ = [
 
     # send/recv
@@ -434,7 +438,6 @@ class Subscriber(SocketThread):
           value to send back to the requester.
 
         """
-
         try:
 
             while not self.terminate.is_set():
@@ -452,7 +455,7 @@ class Subscriber(SocketThread):
                         self._callback(data)
 
         except:
-            self._cleanup(linger=0)
+            self._cleanup()
             raise
 
         self._cleanup()
