@@ -1,3 +1,4 @@
+import collections
 import json
 import os
 import pathlib
@@ -24,9 +25,6 @@ __all__ = [
 
     # Shares classes and constants.
     'PathLike',
-
-    # Threading, multiprocessing, etc.
-    'clear_queue',
 
     # Filesystem and data I/O.
     'pathlike',
@@ -66,19 +64,6 @@ __all__ = [
 
 
 PathLike = Union[str, pathlib.Path]
-
-
-#------------------------------------------------------------------------------#
-# Threading, multiprocesing, etc.
-
-
-def clear_queue(q: queue.Queue) -> None:
-    """
-    Empty a queue.
-    """
-    while not q.empty():
-        q.get()
-
 
 
 #------------------------------------------------------------------------------#

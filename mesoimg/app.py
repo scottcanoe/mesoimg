@@ -13,24 +13,17 @@ import psutil
 __all__ = [
     'appdir',
     'userdir',
-    'read_procinfo',
-    'write_procinfo',
-    'delete_procinfo',
-    'find_from_procinfo',
-    'kill_from_procinfo',
+    'logdir',
+    'save_procinfo',
+    'load_procinfo',
+    'from_procinfo',
     'Ports',
 ]
 
 
+
 APPDIR = Path(__file__).parent.parent
 USERDIR = Path.home() / '.mesoimg'
-if not USERDIR.exists():
-    USERDIR.mkdir()
-
-for name in ('cache', 'logs', 'procinfo', 'snippets'):
-    p = USERDIR / name
-    if not p.exists():
-        p.mkdir()
 
 
 def appdir() -> Path:
@@ -41,57 +34,60 @@ def userdir() -> Path:
     return USERDIR
 
 
-def read_procinfo(fname: str) -> Dict:
-    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
-    with open(path, 'r') as f:
-        return json.load(f)
+def logdir() -> Path:
+    return USERDIR / 'logs'
 
 
-def write_procinfo(fname: str) -> None:
 
-    proc = psutil.Process()
+"""
+Process tracking utilities.
+
+"""
+
+
+def save_procinfo(name: str, pid: Optional[int] = None) -> None:
+    """
+    Save process info to a file in case we need to terminate
+    it later when we need to recover its resources.
+    """
+    pid = os.getpid() if pid is None else pid
+    proc = psutil.Process(pid)
     info = {'pid' : proc.pid,
             'create_time' : proc.create_time(),
             'name' : proc.name()}
-    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
+    path = (USERDIR / 'procinfo' / name).with_suffix('.json')
     with open(path, 'w') as f:
         json.dump(info, f, indent=2)
 
 
-def delete_procinfo(fname: str) -> Dict:
-    path = (USERDIR / 'procinfo' / fname).with_suffix('.json')
-    if path.exists():
-        path.unlink()
+def load_procinfo(name: str) -> Dict:
+    """
+    Read stored process info.
+    """
+    path = (USERDIR / 'procinfo' / name).with_suffix('.json')
+    with open(path, 'r') as f:
+        return json.load(f)
 
 
-def find_from_procinfo(fname: str) -> Optional[psutil.Process]:
+
+def from_procinfo(name: str) -> Optional[psutil.Process]:
 
     try:
-        info = read_procinfo(fname)
+        info = load_procinfo(name)
     except FileNotFoundError:
         return
 
     try:
         proc = psutil.Process(info['pid'])
     except psutil.NoSuchProcess:
-        delete_procinfo(fname)
+        path = (USERDIR / 'procinfo' / name).with_suffix('.json')
+        path.unlink()
         return
 
     if proc.create_time() != info['create_time']:
         return
 
     return proc
-
-
-def kill_from_procinfo(fname: str) -> None:
-
-    proc = find_from_procinfo(fname)
-    if proc is None:
-        logging.info(f"No existing process found matching info for '{fname}'")
-        return
-
-    logging.info(f'Killing process (pid={proc.pid}).')
-    proc.kill()
 
 
 

@@ -19,12 +19,8 @@ from typing import (Any,
 import queue
 import numpy as np
 import zmq
-from mesoimg.app import kill_from_procinfo, write_procinfo
-from mesoimg.arrays import Frame
-from mesoimg.buffers import FrameBuffer
-from mesoimg.common import *
-from mesoimg.timing import *
-from mesoimg.outputs import *
+from mesoimg import *
+
 
 
 
@@ -66,7 +62,6 @@ _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
 
 
 
-
 class Camera:
 
 
@@ -87,8 +82,6 @@ class Camera:
 
         # Create the picamera instance with defaults.
         self._init_cam()
-
-
 
 
     #--------------------------------------------------------------------------#
@@ -240,6 +233,7 @@ class Camera:
         """
 
         """
+        from mesoimg.app import from_procinfo, save_procinfo
         from picamera import PiCamera, PiCameraMMALError
 
         resolution  = _DEFAULTS['resolution']
@@ -254,13 +248,19 @@ class Camera:
                                      framerate=framerate,
                                      sensor_mode=sensor_mode)
             except PiCameraMMALError:
-                kill_from_procinfo('picamera')
+
+                proc = from_procinfo('picamera')
+                if proc is None:
+                    raise
+
+                print('Killing old picamera process.')
+                proc.kill()
                 time.sleep(1)
                 self._cam = PiCamera(resolution=resolution,
                                      framerate=framerate,
                                      sensor_mode=sensor_mode)
 
-            write_procinfo('picamera')
+            save_procinfo('picamera', os.getpid())
 
             for key, val in _DEFAULTS.items():
                 if key not in ('resolution', 'framerate', 'sensor_mode'):
@@ -271,13 +271,14 @@ class Camera:
     def clear_frame_attrs(self) -> None:
 
         if self.streaming:
-            raise RuntimeError("Cannot clear frame attrs while streaming.")
+            raise RuntimeError("Cannot reset frame attributes while streaming.")
 
         with self.frame_lock:
             self._frame = None
             self._frame_counter = 0
             self._frame_clock = Clock()
-        clear_queue(self.frame_q)
+        while not self.frame_q.empty():
+            self.frame_q.get(False)
 
 
     def close(self) -> None:
