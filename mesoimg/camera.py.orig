@@ -1,7 +1,5 @@
-from collections import deque
 import io
 import logging
-import multiprocessing as mp
 import os
 from pathlib import Path
 import re
@@ -30,10 +28,6 @@ try:
     HAS_PICAMERA = True
 except:
     HAS_PICAMERA = False
-
-
-logger = logging.getLogger('camera')
-
 
 
 __all__ = [
@@ -73,26 +67,14 @@ _STATUS_ATTRS: ClassVar[Tuple[str]] = (\
     )
 
 
-PAIR = 7010
-FRAME_PUB = 7011
-META_PUB = 7012
-
 
 class Camera:
 
 
-    def __init__(self,
-                 frame_q: Optional[queue.Queue] = None,
-                 meta_q: Optional[queue.Queue] = None,
-                 terminate: Optional[Event] = None,
-                 **config,
-                 ):
-
+    def __init__(self, **config):
 
         # Basic attributes.
         self.lock = Lock()
-        self.rlock = RLock()
-        self.reboot = Event()
 
         # Frame attributes.
         self.frame_lock = Lock()
@@ -101,18 +83,11 @@ class Camera:
         self._frame_clock = Clock()
 
         # Threading and synchronization
-        self.frame_q = frame_q if frame_q else queue.Queue(maxsize=10)
-        self.meta_q = meta_q if meta_q else queue.Queue(maxsize=10)
-        self.terminate = terminate if terminate else Event()
+        self.frame_q = queue.Queue(maxsize=10)
+        self.new_frame = Condition()
 
-
-        self.pair = None
-        self.frame_pub = None
-        self.meta_pub = None
-        self._cam = None
-
-        self.open_connections()
-        self.open_cam()
+        # Create the picamera instance with defaults.
+        self._init_cam()
 
 
     #--------------------------------------------------------------------------#
@@ -259,52 +234,20 @@ class Camera:
     #--------------------------------------------------------------------------#
     # Opening, closing, etc.
 
-
-    def open_connections(self) -> None:
-
-
-        logger.info('open_connections()')
-
-        ctx = zmq.Context.instance()
-
-        self.pair = ctx.socket(zmq.PAIR)
-        self.pair.rcvtimeo = 5000
-        addr = f'tcp://*:{PAIR}'
-        logger.debug(f'binding pair socket to {addr}')
-        self.pair.bind(addr)
-
-        self.frame_pub = Publisher(send=send_frame,
-                                   source=self.frame_q)
-        addr = f'tcp://*:{FRAME_PUB}'
-        logger.debug(f'starting publisher thread bound to {addr}')
-        self.frame_pub.bind(addr)
-        self.frame_pub.start()
-
-
-
-
-    def close_connections(self, linger: Optional[int] = None) -> None:
-
-        logger.debug('close_connections()')
-        if self.pair:
-            self.pair.close()
-
-        if self.frame_pub:
-            self.frame_pub.close()
-
-
-    def open_cam(self):
+    def _init_cam(self):
 
         """
-        Create the wrapped PiCamera object.
+
         """
-        logger.debug('open_cam() - opening picamera instance.')
+<<<<<<< HEAD
+        if not HAS_PICAMERA:
+            raise OSError("No picamera.")
 
-        if self._cam and not self._cam.closed:
-            logger.warning('open_cam() called when camera already open.')
 
-        from picamera import PiCamera, PiCameraMMALError
+=======
         from mesoimg.app import from_procinfo, save_procinfo
+>>>>>>> 192486860e65f619f717dd7cb2546db6fe391f0d
+        from picamera import PiCamera, PiCameraMMALError
 
         resolution  = _DEFAULTS['resolution']
         framerate   = _DEFAULTS['framerate']
@@ -338,19 +281,6 @@ class Camera:
             time.sleep(1.0)
 
 
-    def close_cam(self):
-        logger.debug('close_cam()')
-        self.clear_frame_attrs()
-        self._cam.close()
-
-
-    def close(self) -> None:
-        """Clear and close the picamera instance."""
-        logger.debug('close()')
-        self._cam.close()
-        self.close_connections()
-
-
     def clear_frame_attrs(self) -> None:
 
         if self.streaming:
@@ -360,15 +290,14 @@ class Camera:
             self._frame = None
             self._frame_counter = 0
             self._frame_clock = Clock()
-
         while not self.frame_q.empty():
             self.frame_q.get(False)
 
-        while not self.meta_q.empty():
-            self.meta_q.get(False)
 
-
-
+    def close(self) -> None:
+        """Clear and close the picamera instance."""
+        self.clear_frame_attrs()
+        self._cam.close()
 
 
     def reopen(self) -> None:
@@ -378,7 +307,7 @@ class Camera:
         (e.g., ``frame``, ``frame_q``).
         """
         self.close()
-        self.open_cam()
+        self._init_cam()
 
 
     #--------------------------------------------------------------------------#
@@ -394,8 +323,8 @@ class Camera:
         buf = FrameBuffer(self)
         self._cam.capture(buf, 'rgb', use_video_port=True)
         if out:
-            writer = get_writer(out)
-            writer(out, self._frame)
+            fn = get_writer(out)
+            fn(out, self._frame)
 
 
     def start_streaming(self) -> None:
@@ -417,13 +346,6 @@ class Camera:
         self._cam.stop_recording()
 
 
-    def stream(self, secs: float) -> None:
-        self.start_streaming()
-        self.wait_streaming(secs)
-        self.stop_streaming()
-
-
-
     #--------------------------------------------------------------------------#
     # utilities
 
@@ -433,11 +355,8 @@ class Camera:
 
 
     def setattrs(self, items: Dict[str, Any]) -> None:
-        with self.lock:
-            for key, val in items.items():
-                setattr(self, key, val)
-
-
+        for key, val in items.items():
+            setattr(self, key, val)
 
 
     #--------------------------------------------------------------------------#
@@ -457,18 +376,13 @@ class Camera:
             self._frame = Frame(data, index=index, timestamp=timestamp)
 
         # Push new frame onto the queue, dropping one if necessary.
-        try:
-            self.frame_q.put(self._frame, block=False)
-        except queue.Full:
-            self.frame_q.get(False)
-            self.frame_q.put(self._frame, block=False)
+        if self.frame_q.full():
+            self.frame_q.get()
+        self.frame_q.put(self._frame)
 
-        # Push metadata onto the queue, dropping one if necessary.
-        try:
-            self.meta_q.put(self.status, block=False)
-        except queue.Full:
-            self.meta_q.get(False)
-            self.meta_q.put(self.meta_q, block=False)
+        # Notify listeners that there's a new frame.
+        with self.new_frame:
+            self.new_frame.notify_all()
 
 
     def _validate_channels(self, ch: str) -> str:

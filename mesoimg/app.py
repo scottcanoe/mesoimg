@@ -98,7 +98,24 @@ class Ports(IntEnum):
     """
     COMMAND    = 7000   # req/rep (rep on server side)
     CONSOLE    = 7001   # req/rep (rep on server side)
-    FRAME_PUB  = 7004   # pub/sub
-    STATUS_PUB = 7005   # pub/sub
+
+    CAM_PAIR   = 7010
+    CAM_FRAME  = 7011
+    CAM_META   = 7012
+
+
+"""
+Setup logging.
+"""
+
+logfile = logdir() / 'log.txt'
+logging.basicConfig(filename=logfile,
+                    #filemode='w',
+                    format='%(asctime)s: %(levelname)s %(message)s',
+                    datefmt='%m/%d/%Y %I:%M:%S %p',
+                    level=logging.INFO)
+
+
+
 
 

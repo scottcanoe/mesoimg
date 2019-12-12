@@ -1,7 +1,7 @@
 import datetime
 import os
 import sys
-from threading import Condition, Event, Lock, Thread
+from threading import Condition, Event, Lock, RLock, Thread
 import time
 from time import perf_counter as clock
 import traceback
@@ -10,16 +10,12 @@ import glom
 import numpy as np
 from superjson import json
 import zmq
-from mesoimg.app import userdir, find_from_procinfo, kill_from_procinfo, Ports
-from mesoimg.command_line import *
-from mesoimg.common import *
-from mesoimg.camera import *
-from mesoimg.messaging import *
+from mesoimg import *
 import psutil
 
 
 import logging
-# logfile = userdir() / 'logs' / 'log.txt'
+logfile = userdir() / 'logs' / 'log.txt'
 logging.basicConfig(level=logging.DEBUG)
 
 
@@ -38,16 +34,20 @@ class MesoServer:
     _terminate: bool = False
 
 
-    def __init__(self, host: str = '*'):
+    def __init__(self,
+                 host: str = '*',
+                 context: Optional[zmq.Context] = None,
+                 ):
 
         logging.info('Initializing server.')
 
         # Networking.
-        self.ctx = zmq.Context()
+        self.ctx = context if context else zmq.Context.instance()
         self.sockets = {}
 
         # Conccurrency.
         self.lock = Lock()
+        self.rlock = RLock()
         self.threads = {}
         self._stop_requested = Event()
         self._stopped = Event()
