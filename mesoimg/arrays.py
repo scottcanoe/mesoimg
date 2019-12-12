@@ -28,7 +28,7 @@ class Frame(np.ndarray):
 
 
         # Copy input 'data', and make it frame type.
-        self = np.array(data, dtype=dtype, copy=copy).view(cls)
+        self = np.asarray(data).view(cls)
 
         # Make sure dimensions are reasonable.
         if self.ndim < 2:

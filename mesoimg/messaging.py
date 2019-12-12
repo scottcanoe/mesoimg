@@ -1,6 +1,7 @@
 from enum import IntEnum
 import functools
 import itertools
+import logging
 import queue
 from threading import Condition, Event, Lock, RLock, Thread
 import time
@@ -13,318 +14,58 @@ from mesoimg.arrays import Frame
 
 __all__ = [
 
-    # sockets
-    'as_socket_type',
-    'create_socket',
-    'setsockattr',
-    'getsockattr',
-    'delsockattr',
-    'poll',
-    'poll_in',
-    'poll_out',
-    'can_recv',
-    'can_send',
-
     # send/recv
-    'send_array',
-    'recv_array',
-    'send_bytes',
-    'recv_bytes',
-    'send_frame',
-    'recv_frame',
+    'send',
+    'recv',
+    'send_string',
+    'recv_string',
     'send_json',
     'recv_json',
     'send_pyobj',
     'recv_pyobj',
-    'send_string',
-    'recv_string',
+    'send_array',
+    'recv_array',
+    'send_frame',
+    'recv_frame',
 
     # Threaded workers
     #'RequestReply',
+    'SocketThread',
     'Publisher',
     'Subscriber',
+    #'DataRelay'
 ]
 
 
-_SOCK_TYPE_ALIASES = {\
-    zmq.PAIR : (zmq.PAIR, 'pair'),
-    zmq.REQ  : (zmq.REQ,  'req', 'request'),
-    zmq.REP  : (zmq.REP,  'rep', 'reply'),
-    zmq.PUSH : (zmq.PUSH, 'push'),
-    zmq.PULL : (zmq.PULL, 'pull'),
-    zmq.PUB  : (zmq.PUB,  'pub', 'publish'),
-    zmq.SUB  : (zmq.SUB,  'sub', 'subscribe'),
-}
 
-_TO_SOCK_TYPE = {}
-for sock_type, aliases in _SOCK_TYPE_ALIASES.items():
-    for val in aliases:
-        _TO_SOCK_TYPE[val] = sock_type
+def send(socket: zmq.Socket, data: bytes, **kw) -> None:
 
-
-def as_socket_type(val: Union[str, int]):
-    val = val.lower() if isinstance(val, str) else val
-    try:
-        return _TO_SOCK_TYPE[val]
-    except KeyError:
-        msg = f'Invalid argument for socket type: {val}'
-        raise TypeError(msg)
-
-
-def create_socket(sock_type: Union[str, int],
-                  poller: Optional[Union[bool, zmq.Poller]] = None,
-                  flags: int = zmq.POLLIN | zmq.POLLOUT,
-                  timeout: Optional[float] = None,
-                  context: Optional[zmq.Context] = None,
-                  **kw,
-                  ) -> zmq.Socket:
-
-
-    # Create the socket, and initialize a bunch of attributes to empty values.
-    sock_type = as_socket_type(sock_type)
-    ctx = context if context else zmq.Context.instance()
-    sock = ctx.socket(sock_type)
-
-    # Add polling support.
-    if poller in (None, False):
-        poller = None
-    elif poller is True:
-        poller = zmq.Poller()
-    elif isinstance(poller, zmq.Poller):
-        pass
-    else:
-        raise ValueError(f'{poller} is not a valid argument for poller.')
-
-    setsockattr(sock, 'poller', poller)
-    setsockattr(sock, 'timeout', timeout)
-    if poller:
-        poller.register(sock, flags=flags)
-
-    # Set a topic filter if given.
-    if sock_type == zmq.SUB and 'topic' in kw:
-        set_topic(sock, kw['topic'])
-
-    # Set high-water mark if given.
-    if 'hwm' in kw:
-        sock.hwm = kw['hwm']
-
-    # Finally, return the socket.
-    return sock
-
-
-def set_topic(sock: zmq.Socket, topic: Union[bytes, str]) -> None:
-    topic = topic.encode() if isinstance(topic, str) else topic
-    sock.setsockopt(zmq.SUBSCRIBE, topic)
-
-
-def getsockattr(sock: zmq.Socket,
-                key: str,
-                *default,
-                ) -> Any:
-    """
-    Get a socket's attribute, whether it can be accessed via the socket
-    class' __getattr__ or by accessing its attribute dictionary manually.
-    """
-
-    # Try attribute access the normal way.
-    try:
-        return getattr(sock, key)
-    except AttributeError:
-        pass
-
-    # Try accessing the attribute dict manually.
-    try:
-        return sock.__dict__[key]
-    except KeyError:
-        pass
-
-    # Handle default return value.
-    N = len(default)
-    if N == 0:
-        raise AttributeError(f'Socket has no attribute: {key}')
-    elif N == 1:
-        return default[0]
-    else:
-        raise TypeError('getsockattr expected 2 or 3 arguments, got {N}')
-
-
-
-def setsockattr(sock: zmq.Socket,
-                key: str,
-                val: Any,
-                **kw,
-                ) -> None:
-    """
-    Set a socket's attribute, whether it can be set using the socket
-    class' __setattr__ or by modifying its attribute dictionary 'manually'.
-
-    """
-
-    # Handle pollers.
-    if key == 'poller':
-        cur_poller = getsockattr(sock, 'poller', None)
-        if cur_poller:
-            cur_poller.unregister(sock)
-        if isinstance(val, zmq.Poller):
-            val.register(sock, **kw)
-
-    # Try setting the attribute the normal way.
-    try:
-        return setattr(sock, key, val)
-    except AttributeError:
-        pass
-
-    # Add to socket's attribute dictionary 'manually'.
-    sock.__dict__[key] = val
-
-
-def delsockattr(sock: zmq.Socket,
-                key: str,
-                val: Any,
-                **kw,
-                ) -> None:
-    """
-    Delete a socket's attribute.
-    """
-
-    # Handle pollers.
-    if key == 'poller':
-        cur_poller = getsockattr(sock, 'poller', None)
-        if cur_poller:
-            cur_poller.unregister(sock)
-
-    # Try deleting the attribute the normal way.
-    try:
-        return delattr(sock, key)
-    except:
-        pass
-
-    # Delete directly from the attribute dict.
-    del sock.__dict__[key]
-
-
-def poll(sock: zmq.Socket,
-         flags: int = zmq.POLLIN | zmq.POLLOUT,
-         timeout: Optional[float] = None,
-         ) -> Optional[Tuple[zmq.Socket, int]]:
-
-    timeout = getsockattr(sock, 'timeout', 0) if timeout is None else timeout
-    if timeout is not None:
-        timeout *= 1000
-
-    events = dict(sock.poller.poll(timeout))
-    if sock in events:
-        direction = events[sock]
-        if flags == zmq.POLLIN | zmq.POLLOUT or direction == flags:
-            return sock, direction
-    return None
-
-
-def poll_in(sock: zmq.Socket,
-            timeout: Optional[float] = None,
-            ) -> bool:
-
-    res = poll(sock, zmq.POLLIN, timeout=timeout)
-    return False if res is None else True
-
-
-def poll_out(sock: zmq.Socket,
-             timeout: Optional[float] = None,
-             ) -> bool:
-
-    res = poll(sock, zmq.POLLOUT, timeout=timeout)
-    return False if res is None else True
-
-
-def can_recv(sock: zmq.Socket, poll_result: Dict) -> bool:
-    return sock in poll_result and \
-           poll_result[sock] in (zmq.POLLIN, zmq.POLLIN | zmq.POLLOUT)
-
-
-def can_send(sock: zmq.Socket, poll_result: Dict) -> bool:
-    return sock in poll_result and \
-           poll_result[sock] in (zmq.POLLOUT, zmq.POLLIN | zmq.POLLOUT)
-
-
-
-def send_array(socket: zmq.Socket,
-               data: np.ndarray,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> None:
-    """
-    Send a ndarray.
-    """
-
-    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(data, flags, copy, track)
-
-
-def recv_array(socket: zmq.Socket,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               ) -> np.ndarray:
-    """
-    Receive an ndarray over a zmq socket.
-    """
-    md = socket.recv_json(flags)
-    buf  = memoryview(socket.recv(flags, copy, track))
-    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-
-
-def send_bytes(socket: zmq.Socket, data: bytes, **kw) -> None:
     """
     Send bytes.
     """
     socket.send(data, **kw)
 
 
-def recv_bytes(socket: zmq.Socket, **kw) -> bytes:
+def recv(socket: zmq.Socket, **kw) -> None:
+
     """
     Receive bytes.
     """
     return socket.recv(**kw)
 
 
-def send_frame(socket: zmq.Socket,
-               data: Frame,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               topic: Optional[str] = None,
-               ) -> None:
+def send_string(socket: zmq.Socket, data: str, **kw) -> None:
     """
-    Send a `Frame` object over a zmq socket.
+    Send a string.
     """
-    if topic is not None:
-        socket.send_string(topic, flags | zmq.SNDMORE)
-    md = {'shape': data.shape,
-          'dtype': str(data.dtype),
-          'index': data.index,
-          'timestamp' : data.timestamp}
-    socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(data.data, flags, copy, track)
+    socket.send_string(data, **kw)
 
 
-def recv_frame(socket: zmq.Socket,
-               flags: int = 0,
-               copy: bool = True,
-               track: bool = False,
-               topic: Optional[str] = None,
-               ) -> Frame:
+def recv_string(socket: zmq.Socket, **kw) -> str:
     """
-    Receive a `Frame` object over a zmq socket.
+    Receive a string.
     """
-    if topic is not None:
-        t = socket.recv_string(flags)
-    md = socket.recv_json(flags)
-    buf = memoryview(socket.recv(flags, copy, track))
-    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data, index=md['index'], timestamp=md['timestamp'])
-
+    return socket.recv_string(**kw)
 
 
 def send_json(socket: zmq.Socket, data: dict, **kw) -> None:
@@ -357,35 +98,71 @@ def recv_pyobj(socket: zmq.Socket, **kw) -> Any:
     return socket.recv_pyobj(**kw)
 
 
-def send_string(socket: zmq.Socket, data: str, **kw) -> None:
+def send_array(socket: zmq.Socket, data: np.ndarray, **kw) -> None:
+
     """
-    Send a string.
+    Send a ndarray.
     """
-    socket.send_string(data, **kw)
+
+    md = {'shape' : data.shape, 'dtype' : str(data.dtype)}
+    socket.send_json(md, zmq.SNDMORE)
+    socket.send(data, **kw)
 
 
-def recv_string(socket: zmq.Socket, **kw) -> str:
+def recv_array(socket: zmq.Socket, **kw) -> np.ndarray:
     """
-    Receive a string.
+    Receive an ndarray over a zmq socket.
     """
-    return socket.recv_string(**kw)
+    md = socket.recv_json()
+    buf  = memoryview(socket.recv(**kw))
+    return np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
 
 
-SENDERS = (send_array,
-           send_bytes,
-           send_frame,
-           send_json,
-           send_pyobj,
-           send_string)
+def send_frame(socket: zmq.Socket,
+               data: Frame,
+               flags: int = 0,
+               **kw) -> None:
+    """
+    Send a `Frame` object over a zmq socket.
+    """
+    md = {'shape': data.shape,
+          'dtype': str(data.dtype),
+          'index': data.index,
+          'timestamp' : data.timestamp}
+    socket.send_json(md, flags | zmq.SNDMORE)
+    socket.send(data.data, **kw)
 
-RECEIVERS = (recv_array,
-             recv_bytes,
-             recv_frame,
-             recv_json,
-             recv_pyobj,
-             recv_string)
+
+def recv_frame(socket: zmq.Socket,
+               flags: int = 0,
+               **kw) -> Frame:
+    """
+    Receive a `Frame` object over a zmq socket.
+    """
+
+    md = socket.recv_json(flags)
+    buf = memoryview(socket.recv(**kw))
+    data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
+    return Frame(data, index=md['index'], timestamp=md['timestamp'])
 
 
+_SENDERS = {
+    bytes : send,
+    str : send_string,
+    dict : send_json,
+    object : send_pyobj,
+    np.ndarray : send_array,
+    Frame : send_frame,
+}
+
+_RECEIVERS = {
+    bytes : recv,
+    str : recv_string,
+    dict : recv_json,
+    object : recv_pyobj,
+    np.ndarray : recv_array,
+    Frame : recv_frame,
+}
 
 
 class SocketThread(Thread):
@@ -399,18 +176,18 @@ class SocketThread(Thread):
 
     def __init__(self,
                  sock_type: int,
-                 timeout: float = 1.0,
                  context: Optional[zmq.Context] = None,
                  ):
         super().__init__()
 
+        # Threading tools
+        self.lock = Lock()
+        self.rlock = RLock()
+        self.terminate = Event()
+
         # Create socket.
         ctx = context if context else zmq.Context.instance()
-        self.socket = ctx.socket(sock_type)
-        self.timeout = timeout
-
-        # Setup common variables, events, etc.
-        self.terminate = Event()
+        self._socket = ctx.socket(sock_type)
 
 
 
@@ -426,61 +203,51 @@ class SocketThread(Thread):
         """
         See whether the socket is closed.
         """
-        return self.socket.closed
+        return self._socket.closed
+
+    @property
+    def rcvtimeo(self) -> int:
+        """
+        """
+        return self._socket.rcvtimeo
+
+
+    @rcvtimeo.setter
+    def rcvtimeo(self, msecs: int) -> None:
+        with self.lock:
+            self._socket.rcvtimeo = int(msecs)
 
 
     def bind(self, addr: str) -> None:
         """
         Bind the socket. Only allowed if thread has not yet started.
         """
-        self._check_not_started()
-        self.socket.bind(addr)
+        with self.lock:
+            self._socket.bind(addr)
 
 
     def connect(self, addr: str) -> None:
         """
         Connect the socket. Only allowed if thread has not yet started.
         """
-        self._check_not_started()
-        self.socket.connect(addr)
+        with self.lock:
+            self._socket.connect(addr)
 
 
     def getsockopt(self, key: str) -> None:
         """
         Get socket options. Only allowed if thread has not yet started.
         """
-        self.socket.getsockopt(key)
+        self._socket.getsockopt(key)
 
 
     def setsockopt(self, key: str, val: Any) -> None:
         """
         Set socket options. Only allowed if thread has not yet started.
         """
-        self._check_not_started()
-        self.socket.setsockopt(key, val)
+        with self.lock:
+            self._socket.setsockopt(key, val)
 
-
-    def getsockattr(self, key: str) -> None:
-        """
-        Get socket attribute.
-        """
-        getsockattr(self.socket, key)
-
-
-    def setsockattr(self, key: str, val: Any) -> None:
-        """
-        Set socket attribute. Only allowed if thread has not yet started.
-        """
-        self._check_not_started()
-        setsockattr(self.socket, key, val)
-
-
-    def start(self) -> None:
-        """
-        Record the start time, and start the thread.
-        """
-        self.start_time = time.time()
-        super().start()
 
 
     def run(self) -> None:
@@ -491,54 +258,92 @@ class SocketThread(Thread):
           value to send back to the requester.
 
         """
-        raise NotImplementedError
-        #while not self.terminate.is_set():
-            #time.sleep(0.01)
-        #self.socket.close()
-        #self.stop_time = time.time()
+        try:
+            while not self.terminate.is_set():
+                time.sleep(0.1)
+        except:
+            self._cleanup(linger=0)
+            raise
 
-        #self._cleanup()
+        self._cleanup()
 
 
     def stop(self) -> None:
         """
-        Signal the event loop to stop.
+        Signal the event loop to stop with the terminate event.
         """
         # Request termination of the event loop, and perform timeout check.
         self.terminate.set()
 
 
-    def _cleanup(self) -> None:
+    def close(self) -> None:
+        """
+        Same as ``stop``.
+        """
+        self.terminate.set()
+
+
+    def _cleanup(self, linger: Optional[int] = None) -> None:
         """
         Other threads shouldn't call this. The call to this should
         be at the end of `run()`.
         """
-        self.socket.close()
+        with self.rlock:
+            self._socket.close(linger)
 
-
-    def _check_not_started(self):
-        msg = 'socket is access-protected during thread execution.'
-        if self.is_alive():
-            raise RuntimeError(msg)
 
 
 class Publisher(SocketThread):
     """
+    Publishing socket/thread.
+
 
     """
 
     def __init__(self,
-                 src: queue.Queue,
-                 send: Callable,
-                 topic: str = '',
-                 **kw,
+                 send: Callable = send,
+                 source: Optional[queue.Queue] = None,
+                 topic: Union[bytes, str] = b'',
+                 context: Optional[zmq.Context] = None,
+                 **send_kw,
                  ):
 
-        super().__init__(zmq.PUB, **kw)
+        super().__init__(zmq.PUB, context)
 
-        self.topic = topic.encode() if isinstance(topic, str) else topic
-        self.src = src
-        self.send = send
+        self._send = send
+        self._send_kw = send_kw
+        self._source = source
+        self.topic = topic
+
+
+    @property
+    def source(self) -> queue.Queue:
+        return self._source
+
+    @source.setter
+    def source(self, obj: Optional[queue.Queue]) -> None:
+        with self.lock:
+            self._source = obj
+
+    @property
+    def topic(self) -> bytes:
+        return self._topic
+
+    @topic.setter
+    def topic(self, topic) -> None:
+        with self.lock:
+            topic = topic.encode() if isinstance(topic, str) else topic
+            self._topic = topic
+
+    def emit(self,
+             item: Any,
+             block: bool = True,
+             timeout: Optional[float] = None,
+             ) -> None:
+
+        if self._source is None:
+            raise RuntimeError('Emitter has no source queue.')
+        self._source.put(item, block=block, timeout=timeout)
 
 
     def run(self) -> None:
@@ -550,23 +355,28 @@ class Publisher(SocketThread):
 
         """
 
-        sock = self.socket
-        src = self.src
-        timeout = self.timeout
-        send = self.send
-        topic = self.topic
-        topic = topic.encode() if isinstance(topic, str) else topic
+        if self._source is None:
+            with self.lock:
+                self._source = queue.Queue()
 
-        while not self.terminate.is_set():
-            # Wait for an event or whatever.
-            try:
-                data = src.get(timeout=timeout)
-            except queue.Empty:
-                time.sleep(0.01)
-                continue
-            # Send the topic first, then use the sender for the rest.
-            sock.send(topic, zmq.SNDMORE)
-            send(sock, data)
+        try:
+
+            while not self.terminate.is_set():
+
+                # Get something...
+                try:
+                    data = self._source.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+
+                # Send it...
+                with self.lock:
+                    self._socket.send(self._topic, zmq.SNDMORE)
+                    self._send(self._socket, data, **self._send_kw)
+
+        except:
+            self._cleanup(0)
+            raise
 
         self._cleanup()
 
@@ -579,30 +389,41 @@ class Subscriber(SocketThread):
     """
 
     def __init__(self,
-                 recv: Callable,
-                 dst: Any,
-                 topic: Optional[Union[bytes, str]] = None,
-                 **kw,
+                 recv: Callable = recv,
+                 callback: Optional[Callable] = None,
+                 context: Optional[zmq.Context] = None,
+                 **recv_kw,
                  ):
 
-        super().__init__(zmq.SUB, **kw)
+        super().__init__(zmq.SUB, context)
 
-        self.recv = recv
-        if topic is not None:
-            self.subscribe(topic)
-        self.dst = dst
+        self._recv = recv
+        self._recv_kw = recv_kw
+        self._socket.subscribe(b'')
+        self._socket.rcvtimeo = 1000
+        self._callback = callback
+
+
+    @property
+    def callback(self) -> Callable:
+        return self._callback
+
+    @callback.setter
+    def callback(self, fn: Callable) -> None:
+        with self.lock:
+            self._callback = fn
 
 
     def subscribe(self, topic: Union[bytes, str]) -> None:
-        self._check_not_started()
-        topic = topic.encode() if isinstance(topic, str) else topic
-        self.socket.subscribe(topic)
+        topic = topic.encode if isinstance(topic, str) else topic
+        with self.lock:
+            self._socket.subscribe(topic)
 
 
     def unsubscribe(self, topic: Union[bytes, str]) -> None:
-        self._check_not_started()
-        topic = topic.encode() if isinstance(topic, str) else topic
-        self.socket.unsubscribe(topic)
+        topic = topic.encode if isinstance(topic, str) else topic
+        with self.lock:
+            self._socket.unsubscribe(topic)
 
 
     def run(self) -> None:
@@ -614,77 +435,74 @@ class Subscriber(SocketThread):
 
         """
 
-        sock = self.socket
-        sock.rcvtimeo = int(self.timeout * 1000)
-        recv = self.recv
-        dst = self.dst
-        while not self.terminate.is_set():
-            try:
-                sock.recv()   # discard topic
-            except: #zmq.Again?
-                continue
-            data = recv(sock)
-            dst.put(data)
+        try:
 
-        sock._cleanup()
+            while not self.terminate.is_set():
 
+                # Get something...
+                try:
+                    topic = self._socket.recv()
+                    data = self._recv(self._socket, **self._recv_kw)
+                except zmq.error.Again:
+                    continue
 
+                # Do something with it...
+                with self.lock:
+                    if self._callback:
+                        self._callback(data)
 
-#class RequestReply(SocketThread):
+        except:
+            self._cleanup(linger=0)
+            raise
 
-    #"""
-
-
-                    #state |  REQ  |  REP    Waiting for:
-                   #-------+-------+-------+
-                   #|  0   |  OUT  |   -   |  new msg  /  partner
-      #REQ sends -> |      |       |       |
-                   #|  1   |   -   |   IN  |  partner  /  recv
-   #REP receives -> |      |       |       |
-                   #|  2   |   -   |  OUT  |  partner  /  new msg
-     #REP sends ->  |      |       |       |
-                   #|  3   |  IN   |       |  recv     /  partner
-   #REQ receives -> |      |       |       |
-                   #| (0)  |  OUT  |       |
-
-                      #.
-                      #.
-                      #.
-
-    #When you receive, you switch from POLLIN to POLLOUT.
-    #When you send a message, you are neither POLLIN or POLLOUT (until its read)
-
-    #REP/REQ sockets should never be both POLLIN and POLLOUT. Pair sockets
-    #can do that though.
+        self._cleanup()
 
 
-    #"""
+
+
+    """
+
+
+
+                    state |  REQ  |  REP    Waiting for:
+                   -------+-------+-------+
+                   |  0   |  OUT  |   -   |  new msg  /  partner
+      REQ sends -> |      |       |       |
+                   |  1   |   -   |   IN  |  partner  /  recv
+   REP receives -> |      |       |       |
+                   |  2   |   -   |  OUT  |  partner  /  new msg
+     REP sends ->  |      |       |       |
+                   |  3   |  IN   |       |  recv     /  partner
+   REQ receives -> |      |       |       |
+                   | (0)  |  OUT  |       |
+
+                      .
+                      .
+                      .
+
+    When you receive, you switch from POLLIN to POLLOUT.
+    When you send a message, you are neither POLLIN or POLLOUT (until its read)
+
+    REP/REQ sockets should never be both POLLIN and POLLOUT. Pair sockets
+    can do that though.
+
+"""
+
+#class Reply(SocketThread):
+
 
     #def __init__(self,
-                 #sock_type: int,
-                 #addr: str,
-                 #requests: Optional[queue.Queue],      # messages received
-                 #send_q: Optional[queue.Queue] = None, # messages to send
-                 #bind: bool = False,
-                 #connect: bool = False,
+                 #recv,     # receive input,
+                 #send,
+                 #inbox,    # push it onto the out_q
+                 #outbox,     # get the response from the in_q,
+                 #timeout=0.01,
                  #**kw,
                  #):
 
-        #if sock_type not in (zmq.REP, zmq.REQ):
-            #raise TypeError("sock_type must be zmq.REP or zmq.REQ.")
-
-        #super().__init__(sock_type, **kw)
-
-        #if bind:
-            #self._socket.bind(addr)
-        #elif connect:
-            #self._socket.connect(addr)
-
-        #self._poller = zmq.Poller()
-        #self._poller.register(self._socket)
-
-        #self.inbox = inbox
-        #self.outbox = outbox
+        #super().__init__(zmq.REQ, **kw)
+        #self.poller = zmq.Poller()
+        #self.poller.register(self._socket)
 
 
     #def run(self) -> None:
@@ -696,17 +514,24 @@ class Subscriber(SocketThread):
 
         #"""
 
-        #sock = self._sock
-        #poller = self._poller
-        #self.start_time = time.time()
+        #sock = self._socket
+        #poller = self.poller
+        #timeout = self.timeout
 
-        #while not self._terminate.is_set():
+        #while not self.terminate.is_set():
             #"""
             #If poll result is empty, then no messages have been sent.
 
             #If result has POLLIN, it means we have a message ready to read.
             #"""
-            #poll_result = dict(poller.poll(self._poll_timeout))
+            #info = dict(poller.poll(timeout))
+            #res = info.get(sock)
+            #if res is None:
+                #intmo =
+
+            #if info.get(sock) == zmq.POLLIN:
+                ## Get from
+
             #if sock in poll_result and sock[poll_result] == zmq.POLLIN:
                 #pass
 

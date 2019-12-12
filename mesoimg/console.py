@@ -21,10 +21,11 @@ __all__ = [
 
 
 DEFAULT_TARGETS = (\
-    'cam',
-    'self',
-    'server',
+    'cam.',
+    'self.',
+    'server.',
 )
+
 
 def infer_target(expr: str,
                  targets: Iterable[str] = DEFAULT_TARGETS,
@@ -33,7 +34,7 @@ def infer_target(expr: str,
 
     # Find the prefix to determine which computer will do the evaluation.
     for t in targets:
-        if expr.startswith(t + '.'):
+        if expr.startswith(t):
             return t
     return default
 
@@ -48,6 +49,7 @@ def infer_efun(expr: str) -> Callable:
 
 
 def execute(expr: str,
+            efun: Optional[Callable] = None,
             globals_: Optional[Dict] = None,
             locals_ : Optional[Mapping] = None,
             suppress: bool = True,
@@ -69,20 +71,16 @@ def execute(expr: str,
         empty string is returned.
 
     """
+    efun = infer_efun(expr) if efun is None else efun
     globals_ = globals() if globals_ is None else globals_
     locals_ = locals() if locals_ is None else locals_
     result, out, err = None, io.StringIO(), ''
     with contextlib.redirect_stdout(out):
-        try:
-            efun = infer_efun(expr)
-            result = efun(expr, globals_, locals_)
-        except:
-            if suppress:
+        if suppress:
+            try:
+                result = efun(expr, globals_, locals_)
+            except:
                 err = ''.join(traceback.format_exception(*sys.exc_info()))
-            else:
-                raise
 
     return result, out.getvalue(), err
-
-
 
