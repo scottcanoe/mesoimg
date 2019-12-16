@@ -56,6 +56,8 @@ __all__ = [
     'repr_secs',
     'pprint',
     'pformat',
+
+
 ]
 
 
@@ -218,9 +220,8 @@ def get_reader(path: PathLike, *args, **kw) -> Callable:
         return read_jpeg
     if ext == 'mp4':
         return read_mp4
-    if ext == 'raw':
-        return read_raw
-    raise ValueError(f'No reader for file: {path}')
+    return read_raw
+
 
 
 def get_writer(path: PathLike, *args, **kw) -> Callable:
@@ -232,9 +233,8 @@ def get_writer(path: PathLike, *args, **kw) -> Callable:
         return write_jpeg
     if ext == '.mp4':
         return write_mp4
-    if ext == '.raw':
-        return write_raw
-    raise ValueError(f'No writer for file: {path}')
+    return write_raw
+
 
 
 #------------------------------------------------------------------------------#
