@@ -26,7 +26,7 @@ from mesoimg import *
 
 
 try:
-    from picamera import PiCamera, PiCameraMMALError
+    from picamera import PiCamera, PiCameraMMALError, bcm_host
     HAS_PICAMERA = True
 except:
     HAS_PICAMERA = False
@@ -38,6 +38,7 @@ logger = logging.getLogger('camera')
 
 __all__ = [
     'Camera',
+    'FrameBuffer',
 ]
 
 
@@ -112,7 +113,7 @@ class Camera:
         self._cam = None
 
         self.open_connections()
-        self.open_cam()
+        self.open_cam(**config)
 
 
     #--------------------------------------------------------------------------#
@@ -293,7 +294,7 @@ class Camera:
             self.frame_pub.close()
 
 
-    def open_cam(self):
+    def open_cam(self, **config):
 
         """
         Create the wrapped PiCamera object.
@@ -306,9 +307,9 @@ class Camera:
         from picamera import PiCamera, PiCameraMMALError
         from mesoimg.app import from_procinfo, save_procinfo
 
-        resolution  = _DEFAULTS['resolution']
-        framerate   = _DEFAULTS['framerate']
-        sensor_mode = _DEFAULTS['sensor_mode']
+        sensor_mode = config.get('sensor_mode', _DEFAULTS['sensor_mode'])
+        resolution  = config.get('resolution', _DEFAULTS['resolution'])
+        framerate   = config.get('framerate', _DEFAULTS['framerate'])
 
         with self.lock:
 
@@ -391,8 +392,14 @@ class Camera:
                 ) -> None:
 
         self.clear_frame_attrs()
-        buf = FrameBuffer(self)
-        self._cam.capture(buf, 'rgb', use_video_port=True)
+        # buf = FrameBuffer(self)
+        buf = PiRGBArray(self._cam)
+        self._cam.capture(buf, 'rgb', use_video_port=use_video_port)
+        data = buf.array
+        if self.channels != 'rgb':
+            ch_ix = 'rgb'.index()
+            data = arr[:, :, ch_ix]
+        self._write_callback(data)
         if out:
             writer = get_writer(out)
             writer(out, self._frame)
@@ -402,6 +409,7 @@ class Camera:
 
         self.clear_frame_attrs()
         buf = FrameBuffer(self)
+        self._frame_clock.reset()
         self._cam.start_recording(buf, 'rgb')
 
 
@@ -508,6 +516,104 @@ class Camera:
         s += 'awb gains: (red={:.2f}, blue={:.2f})\n'.format(red, blue)
 
         return s
+
+
+
+
+class FrameBuffer(io.BytesIO):
+
+    """
+    Image buffer for unencoded RGB video.
+
+    """
+
+    def __init__(self,
+                 cam: 'Camera',
+                 contiguous: bool = True,
+                 ):
+        super().__init__()
+
+        self._cam = cam
+        self._contiguous = contiguous
+
+        # Initialize reshaping parameters.
+        # In raw input mode, the sensor sends us data with resolution
+        # rounded up to nearest multiples of 16 or 32. Find this input,
+        # which will be used for the initial reshaping of the data.
+        width, height = cam.resolution
+        fwidth  = bcm_host.VCOS_ALIGN_UP(width,  16)
+        fheight = bcm_host.VCOS_ALIGN_UP(height, 16)
+        self._in_shape = (fheight, fwidth, 3)
+
+        # Once reshaped, any extraneous rows or columns introduced
+        # by the rounding up of the frame shape will need to be
+        # sliced off. Additionally, any unwanted channels will
+        # need to be removed, so we'll combine the two cropping
+        # procedures into one.
+        channels = cam.channels
+        if channels in ('r', 'g', 'b'):
+            ch_index = 'rgb'.find(channels)
+            self._out_shape = (height, width)
+        else:
+            ch_index = slice(None)
+            self._out_shape = (height, width, 3)
+
+        if self._in_shape == self._out_shape:
+            self._out_slice = (slice(None),   slice(None),  ch_index)
+        else:
+            self._out_slice = (slice(height), slice(width), ch_index)
+
+        self._n_bytes_in = np.prod(self._in_shape)
+        self._n_bytes_out = np.prod(self._out_shape)
+
+
+    def write(self, data: bytes) -> int:
+
+        """
+        Reads and reshapes the buffer into an ndarray, and sets the
+        `_frame` attribute with the new array along with its index
+        and timestamp.
+
+        Sets the camera's `new_frame` event.
+        If dumping to a file and writing is complete, sets
+        the camera's `write_complete` event.
+
+        """
+        import pdb
+
+        # Alias
+        bpf = self._n_bytes_in
+
+        # Write the bytes to the buffer.
+        n_bytes = super().write(data)
+
+        # If an entire frame is complete, dispatch it.
+        bytes_available = self.tell()
+
+        if bytes_available != bpf:
+            breakpoint()
+            msg = f"Expected {bpf} bytes, received {bytes_available}"
+            raise IOError(msg)
+
+
+        data = np.frombuffer(self.getvalue(), dtype=np.uint8)
+        data = data.reshape(self._in_shape)[self._out_slice]
+        if self._contiguous and not data.flags.c_contiguous:
+            data = np.ascontiguousarray(data)
+        self.data = data
+        self._cam._write_callback(data)
+        self.seek(0)
+        self.truncate(0)
+
+        return n_bytes
+
+
+    def close(self) -> None:
+        self.flush()
+        self.truncate(0)
+        self.seek(0)
+        self.data = None
+        super().close()
 
 
 

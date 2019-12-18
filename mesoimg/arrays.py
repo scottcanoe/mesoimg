@@ -256,7 +256,7 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
                 s += f'label=None, '
             else:
                 s += f"label='{self.label}', "
-        s += f'timestamp={self._timestamp}>'
+        s += f'timestamp={self._timestamp:.4f}>'
         return s
 
 

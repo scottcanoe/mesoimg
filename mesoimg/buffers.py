@@ -76,6 +76,7 @@ class FrameBuffer(io.BytesIO):
 
 
     def write(self, data: bytes) -> int:
+    # def flush(self):
         """
         Reads and reshapes the buffer into an ndarray, and sets the
         `_frame` attribute with the new array along with its index
@@ -86,30 +87,47 @@ class FrameBuffer(io.BytesIO):
         the camera's `write_complete` event.
 
         """
+        import pdb
+
+        # Alias
+        bpf = self._n_bytes_in
 
         # Write the bytes to the buffer.
         n_bytes = super().write(data)
 
         # If an entire frame is complete, dispatch it.
         bytes_available = self.tell()
+
+        # print(f'bytes_available: {bytes_available}, bpf: {bpf}')
+        # print('bpf')
+
+        breakpoint()
+
         if bytes_available < self._n_bytes_in:
-            print('not full frame', flush=True)
             return n_bytes
-        if bytes_available > self._n_bytes_in:
-            msg = f"Expected {self._n_bytes_in} bytes, received {bytes_available}"
-            raise IOError(msg)
 
-        # Reshape the data from the buffer, and send the data back
-        # to the camera for further handling.
-        data = np.frombuffer(self.getvalue(), dtype=np.uint8)
-        data = data.reshape(self._in_shape)[self._out_slice]
-        if self._contiguous and not data.flags.c_contiguous:
-            data = np.ascontiguousarray(data)
-        self._cam._write_callback(data)
+        if bytes_available >= self._n_bytes_in:
+            # msg = f"Expected {self._n_bytes_in} bytes, received {bytes_available}"
+            # raise IOError(msg)
+            # breakpoint()
+            # Reshape the data from the buffer, and send the data back
+            # to the camera for further handling.
+            all_data = np.frombuffer(self.getvalue(), dtype=np.uint8)
+            data = all_data[:bpf]
+            leftover = all_data[bpf:]
+            self.seek(0)
+            # self.truncate(0)
+            self.write(leftover)
 
-        # Finally, rewind the buffer and truncate.
-        self.truncate(0)
-        self.seek(0)
+            data = data.reshape(self._in_shape)[self._out_slice]
+            if self._contiguous and not data.flags.c_contiguous:
+                data = np.ascontiguousarray(data)
+            self._cam._write_callback(data)
+
+            # Finally, rewind the buffer and truncate.
+            # self.truncate(0)
+            # self.seek(0)
+
         return n_bytes
 
 
