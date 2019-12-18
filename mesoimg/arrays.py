@@ -1,7 +1,7 @@
 from numbers import Number
 from typing import Any, Optional, Sequence, Tuple, Union
 import numpy as np
-
+import numpy.lib.mixins
 
 
 __all__ = [
@@ -10,98 +10,6 @@ __all__ = [
 
 
 
-class Frame(np.ndarray):
-
-    """
-    Array with attributes (i.e., a `__dict__`).
-
-    """
-
-    _index: Optional[int] = None
-    _timestamp: Optional[float] = None
-
-    def __new__(cls,
-                data: np.ndarray,
-                dtype: Optional[Union[str, type]] = None,
-                copy: bool = True,
-                **attrs,
-                ):
-
-
-        # Copy input 'data', and make it frame type.
-        self = np.asarray(data).view(cls)
-
-        # Make sure dimensions are reasonable.
-        if self.ndim < 2:
-            raise TypeError('too few dimensions for frame object.')
-
-        # If initializing from another frame, assume its attributes.
-        if isinstance(data, Frame):
-            self.__dict__.update(data.__dict__)
-
-        # Update with attributes sent as keyword args.
-        for key, val in attrs.items():
-            setattr(self, key, val)
-
-        # Finally, return the instance.
-        return self
-
-
-    @property
-    def index(self) -> Optional[int]:
-        return self._index
-
-    @index.setter
-    def index(self, val: Optional[int]) -> None:
-        assert isinstance(val, int) or val is None
-        self._index = val
-
-    @property
-    def ix(self) -> Optional[int]:
-        """Alias for index."""
-        return self.index
-
-    @ix.setter
-    def ix(self, val: Optional[int]):
-        self.index = val
-
-    @property
-    def timestamp(self) -> Optional[float]:
-        return self._timestamp
-
-    @timestamp.setter
-    def timestamp(self, val: Optional[float]):
-        assert np.isreal(val) or val is None
-        self._timestamp = val
-
-    @property
-    def ts(self) -> Optional[float]:
-        """Alias for 'timestamps' """
-        return self.timestamp
-
-    @ts.setter
-    def ts(self, val: Optional[float]):
-        self.timestamp = val
-
-
-
-    def __array_finalize__(self, obj):
-
-        # Handle arriving from explicit constructor call.
-        if obj is None:
-            return
-
-        # Handle arriving from  view casting or slicing. This is where the new
-        # object would get attributes carried over from the original.
-        if isinstance(obj, Frame):
-            self.__dict__.update(obj.__dict__)
-            return
-
-
-
-
-
-import numpy.lib.mixins
 
 class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
 
@@ -179,7 +87,7 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
     # Public methods
 
 
-    def astype(self, dtype: type) -> Frame:
+    def astype(self, dtype: type) -> 'Frame':
         return Frame(self, dtype=dtype)
 
 
@@ -240,8 +148,8 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
 
     @classmethod
     def _init_from_frame(cls,
-                         self: Frame,
-                         obj: Frame,
+                         self: 'Frame',
+                         obj: 'Frame',
                          copy: bool,
                          dtype: Optional[type],
                          **attrs,
@@ -264,7 +172,7 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
 
     @classmethod
     def _init_from_array(cls,
-                             self: Frame,
+                             self: 'Frame',
                              data: np.ndarray,
                              copy: bool,
                              dtype: type,
@@ -311,19 +219,19 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
         else:
             return NotImplemented
 
-    def __iadd__(self, other: Union[Number, np.ndarray, Frame]) -> Frame:
+    def __iadd__(self, other: Union[Number, np.ndarray, 'Frame']) -> 'Frame':
         self._data += other
         return self
 
-    def __isub__(self, other: Union[Number, np.ndarray, Frame]) -> Frame:
+    def __isub__(self, other: Union[Number, np.ndarray, 'Frame']) -> 'Frame':
         self._data -= other
         return self
 
-    def __imul__(self, other: Union[Number, np.ndarray, Frame]) -> Frame:
+    def __imul__(self, other: Union[Number, np.ndarray, 'Frame']) -> 'Frame':
         self._data *= other
         return self
 
-    def idiv(self, other) -> Frame:
+    def idiv(self, other) -> 'Frame':
         """
         Couldn't get ufuncs or operator overloads to work with this one.
         """
@@ -332,7 +240,7 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
         self._data /= other
         return self
 
-    def ifloordiv(self, other) -> Frame:
+    def ifloordiv(self, other) -> 'Frame':
         """
         Couldn't get ufuncs or operator overloads to work with this one.
         """
@@ -349,7 +257,7 @@ class Frame(numpy.lib.mixins.NDArrayOperatorsMixin):
                 s += f'label=None, '
             else:
                 s += f"label='{self.label}', "
-        s += f'timestamp={self._timestamp}>'
+        s += f'timestamp={self._timestamp:.4f}>'
         return s
 
 
