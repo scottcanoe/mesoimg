@@ -1,5 +1,6 @@
 import collections
 import json
+from numbers import Number
 import os
 import pathlib
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import (Any,
                     Callable,
                     Dict,
                     List,
+                    NamedTuple,
                     Tuple,
                     Union,
                     )
@@ -24,6 +26,7 @@ import zmq
 __all__ = [
 
     # Shares classes and constants.
+    'Frame',
     'PathLike',
 
     # Filesystem and data I/O.
@@ -57,13 +60,17 @@ __all__ = [
     'pprint',
     'pformat',
 
-
 ]
 
 
 #------------------------------------------------------------------------------#
 # Shares classes and constants
 
+
+class Frame(NamedTuple):
+    data: np.ndarray
+    index: int
+    time: Number
 
 PathLike = Union[str, pathlib.Path]
 
@@ -164,8 +171,8 @@ def read_mp4(path: PathLike):
 
 
 def write_mp4(path: PathLike, data: np.ndarray, fps: float = 30.0) -> None:
-    fps = kw.get('fps', 30)
-    imageio.mimwrite(str(path), mov, fps=fps)
+
+    imageio.mimwrite(str(path), data, fps=fps)
 
 
 def read_raw(path: PathLike,

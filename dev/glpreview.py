@@ -1,22 +1,13 @@
 from threading import Lock, Thread
 import time
-from glumpy import app, gloo, gl, glm
+import queue
+from queue import Queue
 import numpy as np
 import zmq
-from mesoimg.common import *
-from mesoimg.inputs import FrameSubscriber
+from mesoimg import *
+from glumpy import app, gloo, gl, glm
 
 
-
-
-                
-
-lock = Lock()
-frame_base = np.zeros([480, 640], dtype=np.uint8)
-frame = np.zeros([480, 640, 3], dtype=np.uint8)
-n_received = 0
-                
-                
 vertex = """
     attribute vec2 position;
     attribute vec2 texcoord;
@@ -38,28 +29,55 @@ fragment = """
 """
 
 
-context = zmq.Context()
-sock = context.socket(zmq.PULL)
-sock.connect(f'tcp://127.0.0.1:{PREVIEW_PORT}')
+def callback(data: np.ndarray) -> None:
+    """
+    Doctring for f1
+    """
+    try:
+        q.put(data, block=False)
+    except queue.Full:
+        q.get(False)
+        q.put(data, block=False)
 
-frame_receiver = FrameReceiver(sock)
-frame_receiver.start()
 
-win = app.Window(width=480, height=480, aspect=1)
+lock = Lock()
+width, height = 1640, 1232
+frame_rgb = np.zeros([height, width, 3], dtype=np.uint8)
+frame = frame_rgb[:, :, 0]
+
+FRAME_PUB = 7011
+q = Queue(maxsize=30)
+
+sub = Subscriber(recv_frame)
+sub.connect(f'tcp://pi-meso.local:{FRAME_PUB}')
+sub.subscribe(b'')
+sub.callback = callback
+sub.start()
+
+win = app.Window(width=width, height=height, aspect=1, vsync=True)
 
 @win.event
 def on_draw(dt):
+    global q, frame, frame_rgb
+    with lock:
+
+        if q.qsize() > 1:
+            frame = q.get(block=False)
+        if frame.ndim == 2:
+            frame_rgb[:, :, 0] = frame[:]
+            frame_rgb[:, :, 1] = frame[:]
+            frame_rgb[:, :, 2] = frame[:]
+        elif frame.ndim == 3:
+            frame_rgb[:] = frame[:]
+
     win.clear()
-    quad['texture'] = frame
+    quad['texture'] = frame_rgb
     quad.draw(gl.GL_TRIANGLE_STRIP)
 
 quad = gloo.Program(vertex, fragment, count=4)
 quad['position'] = [(-1,-1), (-1,+1), (+1,-1), (+1,+1)]
 quad['texcoord'] = [( 0, 1), ( 0, 0), ( 1, 1), ( 1, 0)]
-quad['texture'] = frame
+quad['texture'] = frame_rgb
 app.run()
 
-frame_receiver.terminate = True
-time.sleep(0.5)
-sock.close()
-context.term()
+#sub.stop()

@@ -18,7 +18,6 @@ from typing import (Any,
                     Sequence,
                     Tuple,
                     Union)
-
 import numpy as np
 import queue
 import zmq
@@ -460,9 +459,9 @@ class Camera:
 
         # Finalize the new frame.
         with self.frame_lock:
-            index, timestamp = self._frame_counter, self._frame_clock()
+            index, time = self._frame_counter, self._frame_clock()
             self._frame_counter += 1
-            self._frame = Frame(data, index=index, timestamp=timestamp)
+            self._frame = Frame(data, index=index, time=time)
 
         # Push new frame onto the queue, dropping one if necessary.
         try:

@@ -5,12 +5,17 @@ import logging
 import queue
 from threading import Condition, Event, Lock, RLock, Thread
 import time
-from typing import Any, Callable, ClassVar, Dict, Optional, Tuple, Union
+from typing import (Any,
+                    Callable,
+                    ClassVar,
+                    Dict,
+                    Optional,
+                    Tuple,
+                    Union)
 import numpy as np
 from superjson import json, SuperJson
 import zmq
-from mesoimg.arrays import Frame
-
+from mesoimg.common import *
 
 logger = logging.getLogger('camera')
 
@@ -123,18 +128,19 @@ def recv_array(socket: zmq.Socket, **kw) -> np.ndarray:
 
 
 def send_frame(socket: zmq.Socket,
-               data: Frame,
+               fm: Frame,
                flags: int = 0,
                **kw) -> None:
     """
     Send a `Frame` object over a zmq socket.
     """
+    data = fm.data
     md = {'shape': data.shape,
           'dtype': str(data.dtype),
-          'index': data.index,
-          'timestamp' : data.timestamp}
+          'index': fm.index,
+          'time' : fm.time}
     socket.send_json(md, flags | zmq.SNDMORE)
-    socket.send(data.data, **kw)
+    socket.send(data, **kw)
 
 
 def recv_frame(socket: zmq.Socket,
@@ -147,7 +153,7 @@ def recv_frame(socket: zmq.Socket,
     md = socket.recv_json(flags)
     buf = memoryview(socket.recv(**kw))
     data = np.frombuffer(buf, dtype=md['dtype']).reshape(md['shape'])
-    return Frame(data, index=md['index'], timestamp=md['timestamp'])
+    return Frame(data, index=md['index'], time=md['time'])
 
 
 _SENDERS = {
@@ -174,8 +180,6 @@ class SocketThread(Thread):
     """
 
     """
-
-    socket: zmq.Socket
 
 
     def __init__(self,
@@ -459,7 +463,6 @@ class Subscriber(SocketThread):
             raise
 
         self._cleanup()
-
 
 
 
