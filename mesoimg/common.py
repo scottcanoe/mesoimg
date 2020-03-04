@@ -14,6 +14,8 @@ from typing import (Any,
                     Dict,
                     List,
                     NamedTuple,
+                    Optional,
+                    Sequence,
                     Tuple,
                     Union,
                     )
@@ -170,9 +172,51 @@ def read_mp4(path: PathLike):
     return imageio.mimread(path)
 
 
-def write_mp4(path: PathLike, data: np.ndarray, fps: float = 30.0) -> None:
 
-    imageio.mimwrite(str(path), data, fps=fps)
+
+def write_mp4(mov: np.ndarray,
+              path: PathLike,
+              cmap: str = 'inferno',
+              levels: Optional[Sequence[float]] = None,
+              percentiles: Sequence[float] = (0.0, 100.0),
+              fps: float = 30.0,
+              upsample: Optional[int] = None,
+              kernel: Optional[Union[float, Sequence[float]]] = None,
+              ) -> None:
+
+    import imageio
+    from matplotlib import cm
+    import matplotlib.colors as mpc
+    from scipy.ndimage import gaussian_filter
+    import scipy.signal
+
+    # Handle path.
+    path = Path(path).with_suffix('.mp4')
+
+    # Build colormap/normalization pipeline.
+    if levels is None:
+        levels = np.percentile(mov, percentiles)
+    norm = mpc.Normalize(vmin=levels[0], vmax=levels[1], clip=True)
+    if isinstance(cmap, str):
+        cmap = cm.get_cmap(cmap)
+    cpipe = cm.ScalarMappable(norm=norm, cmap=cmap)
+
+    # Upsample video.
+    if upsample is not None and upsample > 1:
+        mov = scipy.signal.resample(mov, round(mov.shape[0] * upsample), axis=0)
+
+    # Smooth video.
+    if kernel is not None:
+        mov = gaussian_filter(mov, kernel)
+
+    # Build frames.
+    frames = []
+    for i in range(mov.shape[0]):
+        fm = (255 * cpipe.to_rgba(mov[i])).astype(np.uint8)
+        fm[:, :, -1] = 1
+        frames.append(fm)
+    frames = np.array(frames)
+    imageio.mimwrite(str(path), frames, fps=fps)
 
 
 def read_raw(path: PathLike,

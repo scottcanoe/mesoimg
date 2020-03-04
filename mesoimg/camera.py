@@ -276,7 +276,7 @@ class Camera:
         self.frame_pub = Publisher(send=send_frame,
                                    source=self.frame_q)
         addr = f'tcp://*:{FRAME_PUB}'
-        logger.debug(f'starting publisher thread bound to {addr}')
+        logger.debug(f'starting frame publisher thread bound to {addr}')
         self.frame_pub.bind(addr)
         self.frame_pub.start()
 

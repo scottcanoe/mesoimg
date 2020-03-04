@@ -70,7 +70,10 @@ class H5Writer(Thread):
 
 
     def __call__(self, frame: Frame) -> None:
+        """
+        Callback called by frame subscriber socket thread.
 
+        """
 
         if self._complete:
             self.terminate.set()
@@ -79,8 +82,8 @@ class H5Writer(Thread):
         with self.lock:
 
             index = self.dset.attrs['index']
-            self.dset[index, ...] = frame[:]
-            self.ts[index] = frame.timestamp
+            self.dset[index, ...] = frame.data
+            self.ts[index] = frame.time
             self.dset.attrs['index'] += 1
             self._n_received += 1
             if self._n_received % 30 == 0:
@@ -91,33 +94,19 @@ class H5Writer(Thread):
             self.terminate.set()
 
 
-path = Path.home() / 'test3.h5'
-shape = (5*600, 1232, 1640)
-f = H5Writer(path, shape, dtype=np.uint8)
-f.start()
+
+path = Path.home() / 'mov-03-04-post-impact-3.h5'
+secs = 5 * 60
+fps = 15
+
+nframes = int(secs * fps)
+shape = (nframes, 1232, 1640)
+writer = H5Writer(path, shape, dtype=np.uint8)
+writer.start()
 
 sub = Subscriber(recv_frame)
 sub.connect(f'tcp://pi-meso.local:{Ports.CAM_FRAME}')
 sub.subscribe(b'')
-sub.callback = f
+sub.callback = writer
 sub.start()
-
-#path = Path.home() / 'test.h5'
-#f = h5py.File(str(path), 'r')
-#dset = f['data']
-#mov = dset[:]
-#f.close()
-
-#n_frames, ypix, xpix = mov.shape
-##xmid = int(xpix/2)
-##ymid = int(ypix/2)
-#xmid = 1000
-#ymid = 616
-#q = 486
-#mov = mov[:, ymid-q:ymid+q, xmid-q:xmid+q]
-#ptile = np.percentile(mov, 99.9)
-#mov = mov / ptile
-#mov[mov > 255] = 255
-#p = Path.home() / 'test.mp4'
-#write_mp4(p, mov, fps=15)
 

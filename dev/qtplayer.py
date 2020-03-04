@@ -1,28 +1,29 @@
 from collections import deque
-from threading import Lock, Thread
-import time
-import queue
-from queue import Queue
-import numpy as np
-import zmq
-from mesoimg import *
-
 from pathlib import Path
 import sys
+from threading import Lock, Thread
+import time
+from typing import (Optional, Tuple)
+import queue
+
 import matplotlib.colors as mpc
 from matplotlib import cm
 import numpy as np
-from scipy.ndimage import gaussian_filter, uniform_filter
+import pyqtgraph as pg
 from PyQt5 import QtGui, QtCore, QtWidgets
 from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtGui import QIcon, QPixmap
-import pyqtgraph as pg
+import zmq
 
+from mesoimg import *
+
+
+pg.setConfigOptions(imageAxisOrder='row-major')
 QSizePolicy = QtGui.QSizePolicy
 Policy = QtGui.QSizePolicy.Policy
 
 
-class MoviePlayer(QtGui.QMainWindow):
+class CameraPreview(QtGui.QMainWindow):
 
     """
     Widget that plays movies.
@@ -32,23 +33,28 @@ class MoviePlayer(QtGui.QMainWindow):
 
     """
 
-    init_width = 800
-    init_height = 600
+    frame_sub: zmq.Socket
+    frame_times: deque
+    frame: Optional[Frame] = None
 
-    def __init__(self, frame_q: Queue,
-                       cmap: str = 'gray',
-                       ):
+    init_width: int = 800
+    init_height: int = 600
 
+
+    def __init__(self):
         super().__init__()
 
-        self.frame_q = frame_q
-        self._cmap = cmap
+        self.ctx = zmq.Context()
+        self.frame_sub = self.ctx.socket(zmq.SUB)
+        self.frame_sub.connect(f'tcp://pi-meso.local:{Ports.CAM_FRAME}')
+        self.frame_sub.subscribe(b'')
+        self.frame_sub.rcvtimeo = 10
+
+        self.frame_times = deque(maxlen=100)
         self.frame = None
 
-        pg.setConfigOptions(imageAxisOrder='row-major')
-
         self.setGeometry(50, 50, self.init_width, self.init_height)
-        self.setWindowTitle('Movie Player')
+        self.setWindowTitle('Preview')
 
         # Initialize a central widget and a main layout.
         self._central_widget = QtGui.QWidget(self)
@@ -56,6 +62,7 @@ class MoviePlayer(QtGui.QMainWindow):
         self._layout = QtGui.QVBoxLayout()
         self._central_widget.setLayout(self._layout)
         self.setAutoFillBackground(True)
+
 
         #-----------------------------------------------------------------------
         # Initialize image viewing area.
@@ -71,26 +78,25 @@ class MoviePlayer(QtGui.QMainWindow):
                                                           col=0,
                                                           invertY=True)
         self._view_box.setMenuEnabled(False)
-        #self._view_box.setSizePolicy(QSizePolicy(Policy(1), Policy(5)))
 
         # - Add a image item to the view box.
         self._image = pg.ImageItem()
         self._view_box.addItem(self._image)
 
+
         #-----------------------------------------------------------------------
         # Initialize histogram
 
-        #self._hist = pg.PlotWidget()
-        #hist = Histogram()
-        #self._hist = hist
-        #self._layout.addWidget(self._hist)
 
         # - Initialize other attributes and state variables.
 
         self.hist = pg.HistogramLUTItem(self._image)
         self._graphics_layout.addItem(self.hist)
-        #self.hist.setLevels(0, 255)
-        #self._layout.addWidget(self.hist)
+
+
+        self.input_timer = QtCore.QTimer()
+        self.input_timer.timeout.connect(self.get_input)
+        self.input_timer.start(20)
 
         self._update()
         self.show()
@@ -105,13 +111,40 @@ class MoviePlayer(QtGui.QMainWindow):
     # Public methods
 
 
+    def get_input(self) -> None:
+        """
+        QTimer calls this every 20 msec or so to try and grab
+        new frame data.
+        """
+        try:
+
+            topic = self.frame_sub.recv()
+            fm = recv_frame(self.frame_sub)
+        except zmq.error.Again:
+            return
+
+        self.frame = fm
+        self._update()
+
 
     #--------------------------------------------------------------------------#
     # Private methods
 
+
     def _update(self):
         self._update_image()
-        self._update_histogram()
+        fm = self.frame
+        if fm:
+            ix, t = fm.index, fm.time
+            self.frame_times.append(t)
+            if ix % 30 == 0:
+                tarr = np.array(list(self.frame_times))
+                diffs = np.ediff1d(tarr)
+                fps = 1 / np.mean(diffs)
+                msg = "index={}, time={:.2f}, fps={:.2f}".format(ix, t, fps)
+                print(msg)
+
+
 
     def _update_image(self):
 
@@ -123,18 +156,16 @@ class MoviePlayer(QtGui.QMainWindow):
             self._image.setImage(np.zeros((8, 8)), levels=(0, 1))
             return
 
-        fm = self.frame[:]
-        #fm = self._smap.to_rgba(self._mov[i_frame])
+        data = self.frame.data
+        data = data.T
+        data = np.flipud(data)
 
-        self._image.setImage(fm)
-
-
-    def _update_histogram(self):
-        pass
+        self._image.setImage(data)
 
 
     #--------------------------------------------------------------------------#
     # Reimplemented methods
+
 
     def keyPressEvent(self, event):
 
@@ -147,63 +178,12 @@ class MoviePlayer(QtGui.QMainWindow):
             self.close()
 
 
-class Histogram(pg.PlotWidget):
 
-    def __init__(self, parent=None, background='default', **kargs):
-        super().__init__(parent=parent, background=background, **kargs)
-
-    def sizeHint(self):
-        return (100, 100)
-
-    def sizePolicy(self):
-        return QSizePolicy(Policy(0), Policy(0))
-
-
-timestamps = deque(maxlen=100)
-
-def callback(frame: np.ndarray) -> None:
-    """
-    Doctring for f1
-    """
-    #print(f'callback: {frame}')
-    try:
-        frame_q.put(frame, block=False)
-    except queue.Full:
-        frame_q.get(False)
-        frame_q.put(frame, block=False)
-
-    win.frame = frame
-    win._update_image()
-    try:
-
-        ix, ts = frame.index, frame.timestamp
-        timestamps.append(ts)
-        if ix % 30 == 0:
-            ts = np.array(list(timestamps))
-            diffs = np.ediff1d(ts)
-            fps = 1 / np.mean(diffs)
-            print(f'fps: {fps}')
-            print(f'{frame}')
-    except Exception as exc:
-        print(exc)
-
-
-from mesoimg import Ports
-
-frame_q = Queue(maxsize=30)
 
 app = QtWidgets.QApplication(sys.argv)
-win = MoviePlayer(frame_q)
-
-
-sub = Subscriber(recv_frame)
-sub.connect(f'tcp://pi-meso.local:{Ports.CAM_FRAME}')
-sub.subscribe(b'')
-sub.callback = callback
-sub.start()
+win = CameraPreview()
 
 app.exec_()
-sub.stop()
 time.sleep(0.5)
-sys.exit(0)
+win.frame_sub.close()
 
